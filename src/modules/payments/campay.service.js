@@ -1,4 +1,4 @@
-require('dotenv').config()
+if (process.env.NODE_ENV !== 'production') require('dotenv').config()
 const crypto = require('crypto')
 
 let cachedToken = null
@@ -6,8 +6,8 @@ let tokenExpiresAt = 0
 
 function getConfig() {
   const baseUrl = (process.env.CAMPAY_BASE_URL || 'https://demo.campay.net/api').replace(/\/+$/, '')
-  const username = process.env.CAMPAY_USERNAME
-  const password = process.env.CAMPAY_PASSWORD
+  const username = process.env.CAMPAY_APP_USERNAME || process.env.CAMPAY_USERNAME
+  const password = process.env.CAMPAY_APP_PASSWORD || process.env.CAMPAY_PASSWORD
   const webhookKey = process.env.CAMPAY_WEBHOOK_KEY
   const env = process.env.CAMPAY_ENV || (baseUrl.includes('demo') ? 'demo' : 'production')
 
@@ -45,7 +45,7 @@ async function getToken() {
 
   const { baseUrl, username, password } = getConfig()
   if (!username || !password) {
-    throw new Error('Campay credentials missing. Please set CAMPAY_USERNAME and CAMPAY_PASSWORD in .env')
+    throw new Error('Campay credentials missing. Please set CAMPAY_APP_USERNAME and CAMPAY_APP_PASSWORD in environment variables.')
   }
 
   const res = await fetch(`${baseUrl}/token/`, {
