@@ -4,16 +4,25 @@ const fs = require('fs')
 const path = require('path')
 
 async function runMigrations() {
-  const client = new Client({
-    host:     process.env.DB_HOST     || 'localhost',
-    port:     process.env.DB_PORT     || 5432,
-    database: process.env.DB_NAME     || 'carely',
-    user:     process.env.DB_USER     || 'postgres',
-    password: process.env.DB_PASSWORD || 'postgres',
-  })
+  // Use DATABASE_URL (Neon/production) if available, otherwise individual vars (local dev)
+  const clientConfig = process.env.DATABASE_URL
+    ? {
+        connectionString: process.env.DATABASE_URL,
+        ssl: { rejectUnauthorized: false },
+      }
+    : {
+        host:     process.env.DB_HOST     || 'localhost',
+        port:     Number(process.env.DB_PORT) || 5432,
+        database: process.env.DB_NAME     || 'carely',
+        user:     process.env.DB_USER     || 'postgres',
+        password: process.env.DB_PASSWORD || 'postgres',
+      }
+
+  const client = new Client(clientConfig)
 
   await client.connect()
-  console.log('✅ Connected to PostgreSQL')
+  const dbTarget = process.env.DATABASE_URL ? 'Neon PostgreSQL (DATABASE_URL)' : `${process.env.DB_HOST || 'localhost'}/${process.env.DB_NAME || 'carely'}`
+  console.log(`✅ Connected to PostgreSQL — ${dbTarget}`)
 
   // Create migrations tracking table if it doesn't exist
   await client.query(`
