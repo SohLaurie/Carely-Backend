@@ -5,10 +5,17 @@ let cachedToken = null
 let tokenExpiresAt = 0
 
 function getConfig() {
-  const baseUrl = (process.env.CAMPAY_BASE_URL || 'https://demo.campay.net/api').replace(/\/+$/, '')
-  const username = process.env.CAMPAY_APP_USERNAME || process.env.CAMPAY_USERNAME
-  const password = process.env.CAMPAY_APP_PASSWORD || process.env.CAMPAY_PASSWORD
-  const webhookKey = process.env.CAMPAY_WEBHOOK_KEY
+  let baseUrl = (process.env.CAMPAY_BASE_URL || 'https://demo.campay.net/api').trim().replace(/\/+$/, '')
+  // Campay API routes are at /api/token/, /api/collect/, etc.
+  // Strip accidental /v2 or /v1 suffix if set in dashboard or .env
+  baseUrl = baseUrl.replace(/\/v[12]$/i, '')
+  if (!baseUrl.endsWith('/api')) {
+    baseUrl = `${baseUrl}/api`
+  }
+
+  const username = (process.env.CAMPAY_APP_USERNAME || process.env.CAMPAY_USERNAME || '').trim()
+  const password = (process.env.CAMPAY_APP_PASSWORD || process.env.CAMPAY_PASSWORD || '').trim()
+  const webhookKey = (process.env.CAMPAY_WEBHOOK_KEY || '').trim()
   const env = process.env.CAMPAY_ENV || (baseUrl.includes('demo') ? 'demo' : 'production')
 
   return {
@@ -120,7 +127,10 @@ async function collectPayment({
       body: JSON.stringify(payload),
     })
 
-    const data = await res.json()
+    if (res.status === 401 || res.status === 403) {
+      cachedToken = null
+      tokenExpiresAt = 0
+    }
 
     if (res.ok && data.reference) {
       return {
@@ -132,10 +142,10 @@ async function collectPayment({
       }
     }
 
-    console.warn(`⚠️ [Campay Collect] Live API returned ${res.status}:`, data)
+    console.error(`❌ [Campay Collect] Live API returned status ${res.status}:`, data)
     return fallbackSimulation(payload, externalReference)
   } catch (err) {
-    console.warn('⚠️ [Campay Collect] Error connecting to Campay:', err.message)
+    console.error('❌ [Campay Collect] Error connecting to Campay:', err.message)
     return fallbackSimulation(payload, externalReference)
   }
 }

@@ -23,8 +23,11 @@ async function listConversations(userId) {
       c.id,
       c.participant1_id,
       c.participant2_id,
+      c.participant1_deleted_at,
+      c.participant2_deleted_at,
       c.created_at,
       c.updated_at,
+      CASE WHEN c.participant1_id = $1 THEN c.participant1_deleted_at ELSE c.participant2_deleted_at END AS user_deleted_at,
       CASE WHEN c.participant1_id = $1 THEN c.participant2_id ELSE c.participant1_id END AS other_user_id,
       u.first_name,
       u.last_name,
@@ -47,6 +50,7 @@ async function listConversations(userId) {
         )
         FROM messages m
         WHERE m.conversation_id = c.id
+          AND m.created_at > COALESCE(CASE WHEN c.participant1_id = $1 THEN c.participant1_deleted_at ELSE c.participant2_deleted_at END, '1970-01-01'::timestamptz)
         ORDER BY m.created_at DESC
         LIMIT 1
       ) AS last_message,
@@ -56,11 +60,20 @@ async function listConversations(userId) {
         WHERE m.conversation_id = c.id
           AND m.receiver_id = $1
           AND m.status != 'read'
+          AND m.created_at > COALESCE(CASE WHEN c.participant1_id = $1 THEN c.participant1_deleted_at ELSE c.participant2_deleted_at END, '1970-01-01'::timestamptz)
       ) AS unread_count
     FROM conversations c
     JOIN users u ON u.id = (CASE WHEN c.participant1_id = $1 THEN c.participant2_id ELSE c.participant1_id END)
     LEFT JOIN providers p ON p.id = u.id
-    WHERE c.participant1_id = $1 OR c.participant2_id = $1
+    WHERE (c.participant1_id = $1 OR c.participant2_id = $1)
+      AND (
+        (CASE WHEN c.participant1_id = $1 THEN c.participant1_deleted_at ELSE c.participant2_deleted_at END) IS NULL
+        OR (
+          SELECT MAX(m.created_at) 
+          FROM messages m 
+          WHERE m.conversation_id = c.id
+        ) > (CASE WHEN c.participant1_id = $1 THEN c.participant1_deleted_at ELSE c.participant2_deleted_at END)
+      )
     ORDER BY c.updated_at DESC;
   `;
 
@@ -147,15 +160,28 @@ async function getConversationMessages(conversationId, userId) {
     throw err;
   }
 
-  // Mark all unread messages received by this user as read
+  const conv = convRows[0];
+  const userDeletedAt = conv.participant1_id === userId
+    ? conv.participant1_deleted_at
+    : conv.participant2_deleted_at;
+
+  // Mark all unread messages received by this user as read (only messages visible to this user)
   await pool.query(
-    "UPDATE messages SET status = 'read', read_at = now() WHERE conversation_id = $1 AND receiver_id = $2 AND status != 'read'",
-    [conversationId, userId]
+    `UPDATE messages 
+     SET status = 'read', read_at = now() 
+     WHERE conversation_id = $1 
+       AND receiver_id = $2 
+       AND status != 'read'
+       AND created_at > COALESCE($3, '1970-01-01'::timestamptz)`,
+    [conversationId, userId, userDeletedAt]
   );
 
   const { rows } = await pool.query(
-    'SELECT * FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC',
-    [conversationId]
+    `SELECT * FROM messages 
+     WHERE conversation_id = $1 
+       AND created_at > COALESCE($2, '1970-01-01'::timestamptz)
+     ORDER BY created_at ASC`,
+    [conversationId, userDeletedAt]
   );
 
   return rows.map(m => ({
@@ -218,7 +244,15 @@ async function sendMessage(conversationId, senderId, { text, attachmentUrl, atta
     ]
   );
 
-  await pool.query('UPDATE conversations SET updated_at = now() WHERE id = $1', [conversationId]);
+  // If sender previously deleted/cleared this conversation, reset their deletion timestamp
+  const isP1 = conv.participant1_id === senderId;
+  if (isP1 && conv.participant1_deleted_at) {
+    await pool.query('UPDATE conversations SET participant1_deleted_at = NULL, updated_at = now() WHERE id = $1', [conversationId]);
+  } else if (!isP1 && conv.participant2_deleted_at) {
+    await pool.query('UPDATE conversations SET participant2_deleted_at = NULL, updated_at = now() WHERE id = $1', [conversationId]);
+  } else {
+    await pool.query('UPDATE conversations SET updated_at = now() WHERE id = $1', [conversationId]);
+  }
 
   return {
     id: msg.id,
@@ -277,8 +311,28 @@ async function deleteConversation(conversationId, userId) {
     err.status = 404;
     throw err;
   }
-  await pool.query('DELETE FROM conversations WHERE id = $1', [conversationId]);
-  return { message: 'Conversation deleted.' };
+
+  const conv = rows[0];
+  const isP1 = conv.participant1_id === userId;
+
+  // Check if the other party has already deleted the conversation
+  const otherDeleted = isP1
+    ? conv.participant2_deleted_at !== null
+    : conv.participant1_deleted_at !== null;
+
+  if (otherDeleted) {
+    // Both parties have deleted -> permanently delete conversation and messages from DB
+    await pool.query('DELETE FROM conversations WHERE id = $1', [conversationId]);
+    return { message: 'Conversation deleted permanently for both parties.' };
+  } else {
+    // Only this party deleted -> mark deletion timestamp on their side (preserves for other party)
+    if (isP1) {
+      await pool.query('UPDATE conversations SET participant1_deleted_at = now(), updated_at = now() WHERE id = $1', [conversationId]);
+    } else {
+      await pool.query('UPDATE conversations SET participant2_deleted_at = now(), updated_at = now() WHERE id = $1', [conversationId]);
+    }
+    return { message: 'Conversation deleted on your side.' };
+  }
 }
 
 async function clearConversationChat(conversationId, userId) {
@@ -291,8 +345,18 @@ async function clearConversationChat(conversationId, userId) {
     err.status = 404;
     throw err;
   }
-  await pool.query('DELETE FROM messages WHERE conversation_id = $1', [conversationId]);
-  return { message: 'Chat history cleared.' };
+
+  const conv = rows[0];
+  const isP1 = conv.participant1_id === userId;
+
+  // Set this participant's deletion timestamp to now so past messages are cleared on their side
+  if (isP1) {
+    await pool.query('UPDATE conversations SET participant1_deleted_at = now(), updated_at = now() WHERE id = $1', [conversationId]);
+  } else {
+    await pool.query('UPDATE conversations SET participant2_deleted_at = now(), updated_at = now() WHERE id = $1', [conversationId]);
+  }
+
+  return { message: 'Chat history cleared on your side.' };
 }
 
 module.exports = {
