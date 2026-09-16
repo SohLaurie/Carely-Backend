@@ -431,7 +431,7 @@ async function paySubscription(providerId, phone = null) {
     message: 'Subscription payment initiated. Please check your phone for the 25 XAF prompt.',
     reference: campayResult?.reference,
     operator: campayResult?.operator,
-    ussdCode: campayResult?.ussd_code,
+    ussdCode: campayResult?.ussdCode || campayResult?.ussd_code,
   }
 }
 

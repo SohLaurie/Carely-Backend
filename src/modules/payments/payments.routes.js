@@ -32,6 +32,12 @@ router.post('/webhook', ctrl.handleWebhook)
 router.get('/verify/:reference', auth, ctrl.verifyPayment)
 
 /**
+ * GET /api/payments/campay-status
+ * Check Campay connection status and environment configuration (public/diagnostic).
+ */
+router.get('/campay-status', ctrl.getCampayStatus)
+
+/**
  * GET /api/payments/:bookingId
  * Get the payment record for a booking (booker, provider, or admin).
  */

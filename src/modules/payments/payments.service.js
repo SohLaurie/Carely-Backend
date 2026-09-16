@@ -66,13 +66,13 @@ async function initiatePayment(bookingId, { providerName, phoneNumber }, payerId
       description: `Carely escrow payment for booking #${bookingId.slice(0, 8)}`,
       externalReference: reference,
     })
-  } catch {
+  } catch (gatewayErr) {
     await pool.query(
       `UPDATE payments SET status = 'failed', updated_at = now() WHERE id = $1`,
       [payment.id]
     )
-    const err = new Error('Payment gateway error. Please try again.')
-    err.status = 502
+    const err = new Error(gatewayErr.message || 'Payment gateway error. Please try again.')
+    err.status = gatewayErr.status || 502
     throw err
   }
 
@@ -88,7 +88,17 @@ async function initiatePayment(bookingId, { providerName, phoneNumber }, payerId
     cleanPhone === '699123456'
   )
 
-  // Update payment with Campay reference
+  // Simulation is strictly forbidden for real numbers
+  if (campayResult.simulated && !isSandboxNumber) {
+    await pool.query(
+      `UPDATE payments SET status = 'failed', updated_at = now() WHERE id = $1`,
+      [payment.id]
+    )
+    const err = new Error('Live payment failed: payment provider returned a simulation instead of dispatching USSD. Please verify Campay credentials.')
+    err.status = 502
+    throw err
+  }
+
   // ONLY auto-confirm if sandbox simulation with sandbox number:
   if (campayResult.simulated && isSandboxNumber) {
     const { rows: [updated] } = await pool.query(

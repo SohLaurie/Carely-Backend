@@ -7,7 +7,7 @@ let tokenExpiresAt = 0
 let activeBaseUrl = null
 
 function getConfig() {
-  let baseUrl = (process.env.CAMPAY_BASE_URL || 'https://demo.campay.net/api').trim().replace(/\/+$/, '')
+  let baseUrl = (process.env.CAMPAY_BASE_URL || 'https://campay.net/api').trim().replace(/\/+$/, '')
   // Campay API routes are at /api/token/, /api/collect/, etc.
   // Strip accidental /v2 or /v1 suffix if set in dashboard or .env
   baseUrl = baseUrl.replace(/\/v[12]$/i, '')
@@ -18,6 +18,7 @@ function getConfig() {
   const clean = (val) => String(val || '').replace(/^["']|["']$/g, '').trim()
   const username = clean(process.env.CAMPAY_APP_USERNAME || process.env.CAMPAY_USERNAME)
   const password = clean(process.env.CAMPAY_APP_PASSWORD || process.env.CAMPAY_PASSWORD)
+  const permanentToken = clean(process.env.CAMPAY_TOKEN || process.env.CAMPAY_API_KEY || process.env.CAMPAY_APP_TOKEN)
   const webhookKey = clean(process.env.CAMPAY_WEBHOOK_KEY)
   const effectiveBaseUrl = activeBaseUrl || baseUrl
   const env = process.env.CAMPAY_ENV || (effectiveBaseUrl.includes('demo') ? 'demo' : 'production')
@@ -27,6 +28,7 @@ function getConfig() {
     configuredBaseUrl: baseUrl,
     username,
     password,
+    permanentToken,
     webhookKey,
     env,
   }
@@ -56,9 +58,17 @@ async function getToken() {
     return cachedToken
   }
 
-  const { baseUrl, username, password } = getConfig()
+  const { baseUrl, username, password, permanentToken } = getConfig()
+
+  // 1. Permanent access token takes precedence if configured directly
+  if (permanentToken) {
+    cachedToken = permanentToken
+    tokenExpiresAt = now + 86400000 * 365
+    return cachedToken
+  }
+
   if (!username || !password) {
-    throw new Error('Campay credentials missing. Please set CAMPAY_APP_USERNAME and CAMPAY_APP_PASSWORD in environment variables.')
+    throw new Error('Campay credentials missing. Please set CAMPAY_APP_USERNAME and CAMPAY_APP_PASSWORD in environment variables (or CAMPAY_TOKEN for permanent token).')
   }
 
   let res = await fetch(`${baseUrl}/token/`, {
@@ -149,6 +159,16 @@ async function collectPayment({
   const { baseUrl, env } = getConfig()
   const formattedPhone = formatPhone(phone || from)
 
+  const isSandboxNumber = (
+    formattedPhone.endsWith('000001') ||
+    formattedPhone.endsWith('000002') ||
+    formattedPhone === '237670000001' ||
+    formattedPhone === '237690000001' ||
+    formattedPhone === '237699000000' ||
+    formattedPhone === '237699123456' ||
+    formattedPhone === '699123456'
+  )
+
   // Campay Demo environment enforces a strict max test amount of 25 XAF.
   // In demo mode, if amount > 25, clamp to 10 XAF so demo USSD requests succeed.
   let apiAmount = Math.round(Number(amount))
@@ -164,40 +184,46 @@ async function collectPayment({
     external_reference: externalReference,
   }
 
-  try {
-    const token = await getToken()
-    const res = await fetch(`${baseUrl}/collect/`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Token ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    })
-
-    if (res.status === 401 || res.status === 403) {
-      cachedToken = null
-      tokenExpiresAt = 0
-    }
-
-    const data = await res.json().catch(() => ({}))
-
-    if (res.ok && data.reference) {
-      return {
-        success: true,
-        reference: data.reference,
-        ussdCode: data.ussd_code || null,
-        operator: data.operator || null,
-        raw: data,
-      }
-    }
-
-    console.error(`❌ [Campay Collect] Live API returned status ${res.status}:`, data)
-    return fallbackSimulation(payload, externalReference)
-  } catch (err) {
-    console.error('❌ [Campay Collect] Error connecting to Campay:', err.message)
+  // ONLY use fallback simulation if an explicit sandbox test number is used in non-production/demo
+  if (isSandboxNumber && (process.env.NODE_ENV !== 'production' || env === 'demo')) {
+    console.log(`🧪 [Campay Collect] Sandbox phone ${formattedPhone} detected in ${env} mode — using sandbox simulation.`)
     return fallbackSimulation(payload, externalReference)
   }
+
+  // REAL PAYMENT: Must dispatch live USSD via Campay API. NEVER silently simulate!
+  const token = await getToken()
+  const res = await fetch(`${baseUrl}/collect/`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Token ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+
+  if (res.status === 401 || res.status === 403) {
+    cachedToken = null
+    tokenExpiresAt = 0
+  }
+
+  const data = await res.json().catch(() => ({}))
+
+  if (res.ok && data.reference) {
+    return {
+      success: true,
+      reference: data.reference,
+      ussdCode: data.ussd_code || null,
+      operator: data.operator || null,
+      raw: data,
+    }
+  }
+
+  const errorMsg = data.message || data.description || data.detail || (typeof data === 'object' && Object.keys(data).length > 0 ? JSON.stringify(data) : `HTTP ${res.status}`)
+  console.error(`❌ [Campay Collect] Live API rejected request (${res.status}):`, errorMsg)
+  const err = new Error(`Campay payment error (${res.status}): ${errorMsg}`)
+  err.status = res.status >= 400 && res.status < 500 ? 400 : 502
+  err.details = data
+  throw err
 }
 
 /**
@@ -270,6 +296,13 @@ async function disburseFunds({
   const { baseUrl, env } = getConfig()
   const formattedPhone = formatPhone(phone)
 
+  const isSandboxNumber = (
+    formattedPhone.endsWith('000001') ||
+    formattedPhone.endsWith('000002') ||
+    formattedPhone === '237670000001' ||
+    formattedPhone === '237690000001'
+  )
+
   let apiAmount = Math.round(Number(amount))
   if (env === 'demo' && apiAmount > 25) {
     apiAmount = 10
@@ -283,40 +316,39 @@ async function disburseFunds({
     external_reference: externalReference,
   }
 
-  try {
-    const token = await getToken()
-    const res = await fetch(`${baseUrl}/withdraw/`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Token ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    })
-
-    const data = await res.json()
-    if (res.ok && data.reference) {
-      return {
-        success: true,
-        reference: data.reference,
-        raw: data,
-      }
-    }
-
-    console.warn(`⚠️ [Campay Disburse] API returned ${res.status}:`, data)
-    return {
-      success: true,
-      simulated: true,
-      reference: `CAMPAY-WDR-${Date.now()}`,
-    }
-  } catch (err) {
-    console.warn('⚠️ [Campay Disburse] Error:', err.message)
+  // Sandbox simulation in non-production
+  if (isSandboxNumber && (process.env.NODE_ENV !== 'production' || env === 'demo')) {
     return {
       success: true,
       simulated: true,
       reference: `CAMPAY-WDR-${Date.now()}`,
     }
   }
+
+  const token = await getToken()
+  const res = await fetch(`${baseUrl}/withdraw/`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Token ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+
+  const data = await res.json().catch(() => ({}))
+  if (res.ok && data.reference) {
+    return {
+      success: true,
+      reference: data.reference,
+      raw: data,
+    }
+  }
+
+  const errorMsg = data.message || data.description || data.detail || (typeof data === 'object' && Object.keys(data).length > 0 ? JSON.stringify(data) : `HTTP ${res.status}`)
+  console.error(`❌ [Campay Disburse] API rejected withdrawal (${res.status}):`, errorMsg)
+  const err = new Error(`Campay payout error (${res.status}): ${errorMsg}`)
+  err.status = res.status >= 400 && res.status < 500 ? 400 : 502
+  throw err
 }
 
 /**
@@ -350,6 +382,44 @@ function fallbackSimulation(payload, externalReference) {
   }
 }
 
+/**
+ * Safe diagnostic status checker for Campay connectivity and environment variables.
+ * Masks credentials for safe public visibility while providing debugging insight.
+ */
+async function checkCampayStatus() {
+  const config = getConfig()
+  const mask = (val) => {
+    if (!val) return 'NOT_SET'
+    if (val.length <= 8) return '****'
+    return `${val.slice(0, 4)}...${val.slice(-4)} (${val.length} chars)`
+  }
+
+  const result = {
+    configuredBaseUrl: config.configuredBaseUrl,
+    activeBaseUrl: config.baseUrl,
+    environment: config.env,
+    hasUsername: Boolean(config.username),
+    usernameMasked: mask(config.username),
+    hasPassword: Boolean(config.password),
+    passwordMasked: mask(config.password),
+    hasToken: Boolean(config.permanentToken),
+    tokenMasked: mask(config.permanentToken),
+    hasWebhookKey: Boolean(config.webhookKey),
+    tokenStatus: null,
+  }
+
+  try {
+    const token = await getToken()
+    result.tokenStatus = 'SUCCESS'
+    result.tokenPreview = `${token.slice(0, 8)}... (${token.length} chars)`
+  } catch (err) {
+    result.tokenStatus = 'FAILED'
+    result.tokenError = err.message
+  }
+
+  return result
+}
+
 module.exports = {
   getToken,
   collectPayment,
@@ -357,4 +427,5 @@ module.exports = {
   disburseFunds,
   verifyWebhookSignature,
   formatPhone,
+  checkCampayStatus,
 }

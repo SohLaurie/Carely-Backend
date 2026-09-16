@@ -51,6 +51,14 @@ async function verifyPayment(req, res, next) {
   } catch (err) { next(err) }
 }
 
+async function getCampayStatus(req, res, next) {
+  try {
+    const campayService = require('./campay.service')
+    const status = await campayService.checkCampayStatus()
+    res.json(status)
+  } catch (err) { next(err) }
+}
+
 module.exports = {
   initiatePayment,
   verifyPayment,
@@ -58,4 +66,5 @@ module.exports = {
   releaseEscrow,
   refundPayment,
   getPaymentByBooking,
+  getCampayStatus,
 }
