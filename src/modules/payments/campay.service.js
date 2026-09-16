@@ -180,6 +180,8 @@ async function collectPayment({
       tokenExpiresAt = 0
     }
 
+    const data = await res.json().catch(() => ({}))
+
     if (res.ok && data.reference) {
       return {
         success: true,

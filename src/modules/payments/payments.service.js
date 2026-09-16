@@ -144,7 +144,8 @@ async function handleWebhook(payload, signature) {
   )
   if (rows.length === 0) {
     // Check if it's a provider 25 XAF subscription activation payment
-    if (status === 'SUCCESSFUL' || status === 'successful') {
+    const statusUpper = String(status || '').toUpperCase()
+    if (statusUpper === 'SUCCESSFUL' || statusUpper === 'COMPLETE' || statusUpper === 'PAID') {
       const subRes = await pool.query(
         `UPDATE providers
          SET subscription_paid = true, updated_at = now()
