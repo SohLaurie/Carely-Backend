@@ -6,6 +6,7 @@ async function getMe(userId) {
     `SELECT
        u.id, u.role, u.first_name, u.last_name, u.email, u.phone,
        u.city, u.date_of_birth, u.gender, u.bio AS user_bio, u.household_size, u.children_ages, u.care_needs,
+       u.emergency_contact, u.secondary_phone, u.preferred_language,
        u.is_active, u.is_verified, u.created_at,
        COALESCE(p.photo_url, u.photo_url) AS photo_url,
        -- Provider details
@@ -44,6 +45,9 @@ async function getMe(userId) {
     householdSize: r.household_size,
     childrenAges: r.children_ages,
     careNeeds: r.care_needs,
+    emergencyContact: r.emergency_contact || (isProvider ? r.reference_phone : null),
+    secondaryPhone: r.secondary_phone || null,
+    preferredLanguage: r.preferred_language || (isProvider && Array.isArray(r.languages) ? r.languages.join(' & ') : null),
     bio: isProvider ? (r.bio || r.user_bio || null) : (r.user_bio || null),
     // Provider specific fields directly accessible
     profession: isProvider ? r.profession : null,
@@ -84,17 +88,20 @@ async function getMe(userId) {
 async function updateMe(userId, data) {
   // Update users table fields
   const userColMap = {
-    firstName:     'first_name',
-    lastName:      'last_name',
-    phone:         'phone',
-    city:          'city',
-    dateOfBirth:   'date_of_birth',
-    gender:        'gender',
-    photoUrl:      'photo_url',
-    bio:           'bio',
-    householdSize: 'household_size',
-    childrenAges:  'children_ages',
-    careNeeds:     'care_needs',
+    firstName:         'first_name',
+    lastName:          'last_name',
+    phone:             'phone',
+    city:              'city',
+    dateOfBirth:       'date_of_birth',
+    gender:            'gender',
+    photoUrl:          'photo_url',
+    bio:               'bio',
+    householdSize:     'household_size',
+    childrenAges:      'children_ages',
+    careNeeds:         'care_needs',
+    emergencyContact:  'emergency_contact',
+    secondaryPhone:    'secondary_phone',
+    preferredLanguage: 'preferred_language',
   }
 
   const userFields = []
@@ -119,14 +126,15 @@ async function updateMe(userId, data) {
 
   // Update providers table fields if user is a provider
   const providerColMap = {
-    profession:     'profession',
-    bio:            'bio',
-    serviceRadius:  'service_radius',
-    experience:     'experience',
-    languages:      'languages',
-    availableDays:  'available_days',
-    certifications: 'certifications',
-    photoUrl:       'photo_url',
+    profession:       'profession',
+    bio:              'bio',
+    serviceRadius:    'service_radius',
+    experience:       'experience',
+    languages:        'languages',
+    availableDays:    'available_days',
+    certifications:   'certifications',
+    photoUrl:         'photo_url',
+    emergencyContact: 'reference_phone',
   }
 
   const pFields = []

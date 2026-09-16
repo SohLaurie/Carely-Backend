@@ -39,6 +39,14 @@ pool.connect((err, client, release) => {
       : `${process.env.DB_HOST || 'localhost'}/${process.env.DB_NAME || 'carely'}`
     console.log(`✅ Connected to PostgreSQL — ${dbInfo}`)
     release()
+
+    // Ensure extra profile columns exist on users table
+    pool.query(`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS emergency_contact TEXT,
+        ADD COLUMN IF NOT EXISTS secondary_phone TEXT,
+        ADD COLUMN IF NOT EXISTS preferred_language TEXT;
+    `).catch(e => console.warn('Schema check notice:', e.message))
   }
 })
 
