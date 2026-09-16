@@ -76,10 +76,47 @@ async function initiatePayment(bookingId, { providerName, phoneNumber }, payerId
     throw err
   }
 
-  // Update payment with Campay reference and mark as held in escrow
+  // Check if sandbox test number
+  const cleanPhone = String(phoneNumber || '').replace(/\D/g, '')
+  const isSandboxNumber = (
+    cleanPhone.endsWith('000001') ||
+    cleanPhone.endsWith('000002') ||
+    cleanPhone === '237670000001' ||
+    cleanPhone === '237690000001' ||
+    cleanPhone === '237699000000' ||
+    cleanPhone === '237699123456' ||
+    cleanPhone === '699123456'
+  )
+
+  // Update payment with Campay reference
+  // ONLY auto-confirm if sandbox simulation with sandbox number:
+  if (campayResult.simulated && isSandboxNumber) {
+    const { rows: [updated] } = await pool.query(
+      `UPDATE payments
+       SET status = 'held_in_escrow',
+           campay_ref = $2,
+           updated_at = now()
+       WHERE id = $1
+       RETURNING *`,
+      [payment.id, campayResult.reference]
+    )
+    await confirmBookingAfterPayment(bookingId)
+    return {
+      message: 'Sandbox payment confirmed. Funds held in escrow.',
+      payment: updated,
+      campayRef: campayResult.reference,
+      ussdCode: campayResult.ussdCode,
+      operator: campayResult.operator,
+      simulated: true,
+      confirmed: true,
+    }
+  }
+
+  // REAL PAYMENT: Keep payment as 'pending' and booking as 'accepted' / 'unpaid'
+  // until user confirms USSD prompt on their phone!
   const { rows: [updated] } = await pool.query(
     `UPDATE payments
-     SET status = 'held_in_escrow',
+     SET status = 'pending',
          campay_ref = $2,
          updated_at = now()
      WHERE id = $1
@@ -87,15 +124,13 @@ async function initiatePayment(bookingId, { providerName, phoneNumber }, payerId
     [payment.id, campayResult.reference]
   )
 
-  // Confirm booking (sets payment_status = 'paid', status = 'confirmed')
-  await confirmBookingAfterPayment(bookingId)
-
   return {
-    message: 'Payment initialized successfully via Campay. Funds held in escrow.',
+    message: 'USSD payment prompt sent to your phone. Please authorize payment.',
     payment: updated,
     campayRef: campayResult.reference,
     ussdCode: campayResult.ussdCode,
     operator: campayResult.operator,
+    confirmed: false,
   }
 }
 
@@ -103,21 +138,22 @@ async function initiatePayment(bookingId, { providerName, phoneNumber }, payerId
 async function verifyPayment(reference) {
   const result = await campayService.getTransactionStatus(reference)
 
-  if (result.status === 'SUCCESSFUL' || result.status === 'complete' || result.status === 'held_in_escrow') {
+  const statusUpper = String(result.status || '').toUpperCase()
+  if (statusUpper === 'SUCCESSFUL' || statusUpper === 'COMPLETE' || statusUpper === 'HELD_IN_ESCROW' || statusUpper === 'PAID') {
     const { rows } = await pool.query(
       `UPDATE payments
        SET status = 'held_in_escrow', updated_at = now()
-       WHERE campay_ref = $1
+       WHERE campay_ref = $1 AND status != 'held_in_escrow'
        RETURNING *`,
       [reference]
     )
     if (rows.length > 0) {
       await confirmBookingAfterPayment(rows[0].booking_id)
-      return { success: true, payment: rows[0], status: result.status }
+      return { success: true, payment: rows[0], status: result.status, confirmed: true }
     }
   }
 
-  return result
+  return { success: false, status: result.status || 'PENDING', reference }
 }
 
 // ── Webhook Handler (Campay) ───────────────────────────────────────────────────
