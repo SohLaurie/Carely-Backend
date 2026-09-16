@@ -156,7 +156,6 @@ async function collectPayment({
   description,
   externalReference,
 }) {
-  const { baseUrl, env } = getConfig()
   const formattedPhone = formatPhone(phone || from)
 
   const isSandboxNumber = (
@@ -172,7 +171,8 @@ async function collectPayment({
   // Campay Demo environment enforces a strict max test amount of 25 XAF.
   // In demo mode, if amount > 25, clamp to 10 XAF so demo USSD requests succeed.
   let apiAmount = Math.round(Number(amount))
-  if (env === 'demo' && apiAmount > 25) {
+  const currentConfig = getConfig()
+  if (currentConfig.env === 'demo' && apiAmount > 25) {
     apiAmount = 10
   }
 
@@ -185,14 +185,17 @@ async function collectPayment({
   }
 
   // ONLY use fallback simulation if an explicit sandbox test number is used in non-production/demo
-  if (isSandboxNumber && (process.env.NODE_ENV !== 'production' || env === 'demo')) {
-    console.log(`🧪 [Campay Collect] Sandbox phone ${formattedPhone} detected in ${env} mode — using sandbox simulation.`)
+  if (isSandboxNumber && (process.env.NODE_ENV !== 'production' || currentConfig.env === 'demo')) {
+    console.log(`🧪 [Campay Collect] Sandbox phone ${formattedPhone} detected in ${currentConfig.env} mode — using sandbox simulation.`)
     return fallbackSimulation(payload, externalReference)
   }
 
   // REAL PAYMENT: Must dispatch live USSD via Campay API. NEVER silently simulate!
-  const token = await getToken()
-  const res = await fetch(`${baseUrl}/collect/`, {
+  // Always obtain token first so auto-detect can determine activeBaseUrl (Demo vs Live)
+  let token = await getToken()
+  let { baseUrl, env } = getConfig()
+
+  let res = await fetch(`${baseUrl}/collect/`, {
     method: 'POST',
     headers: {
       'Authorization': `Token ${token}`,
@@ -201,9 +204,31 @@ async function collectPayment({
     body: JSON.stringify(payload),
   })
 
+  // If token rejected with 401 Invalid Token, switch activeBaseUrl and auto-retry with fresh token
   if (res.status === 401 || res.status === 403) {
     cachedToken = null
     tokenExpiresAt = 0
+
+    const isDemo = baseUrl.includes('demo')
+    const altBaseUrl = isDemo ? 'https://campay.net/api' : 'https://demo.campay.net/api'
+    console.warn(`⚠️ [Campay Collect] Token rejected (401) on ${baseUrl}. Attempting auto-retry on ${altBaseUrl}...`)
+
+    try {
+      activeBaseUrl = altBaseUrl
+      token = await getToken()
+      baseUrl = altBaseUrl
+
+      res = await fetch(`${baseUrl}/collect/`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Token ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      })
+    } catch (retryErr) {
+      console.warn('⚠️ [Campay Collect] Alternate endpoint retry failed:', retryErr.message)
+    }
   }
 
   const data = await res.json().catch(() => ({}))
@@ -219,7 +244,7 @@ async function collectPayment({
   }
 
   const errorMsg = data.message || data.description || data.detail || (typeof data === 'object' && Object.keys(data).length > 0 ? JSON.stringify(data) : `HTTP ${res.status}`)
-  console.error(`❌ [Campay Collect] Live API rejected request (${res.status}):`, errorMsg)
+  console.error(`❌ [Campay Collect] API rejected request on ${baseUrl} (${res.status}):`, errorMsg)
   const err = new Error(`Campay payment error (${res.status}): ${errorMsg}`)
   err.status = res.status >= 400 && res.status < 500 ? 400 : 502
   err.details = data
@@ -232,10 +257,19 @@ async function collectPayment({
  * @param {string} reference - Campay transaction reference UUID
  */
 async function getTransactionStatus(reference) {
-  const { baseUrl } = getConfig()
+  // If this was a simulated reference (e.g. sandbox testing), don't query Campay
+  if (String(reference).startsWith('CAMPAY-')) {
+    return {
+      success: true,
+      reference,
+      status: 'PENDING',
+      simulated: true,
+    }
+  }
 
   try {
     const token = await getToken()
+    const { baseUrl } = getConfig()
     const res = await fetch(`${baseUrl}/transaction/${reference}/`, {
       method: 'GET',
       headers: {
@@ -249,7 +283,6 @@ async function getTransactionStatus(reference) {
         success: true,
         reference,
         status: 'PENDING',
-        simulated: true,
       }
     }
 
@@ -271,7 +304,6 @@ async function getTransactionStatus(reference) {
       success: true,
       reference,
       status: 'PENDING',
-      simulated: true,
     }
   }
 }
@@ -293,7 +325,6 @@ async function disburseFunds({
   description,
   externalReference,
 }) {
-  const { baseUrl, env } = getConfig()
   const formattedPhone = formatPhone(phone)
 
   const isSandboxNumber = (
@@ -303,8 +334,9 @@ async function disburseFunds({
     formattedPhone === '237690000001'
   )
 
+  const currentConfig = getConfig()
   let apiAmount = Math.round(Number(amount))
-  if (env === 'demo' && apiAmount > 25) {
+  if (currentConfig.env === 'demo' && apiAmount > 25) {
     apiAmount = 10
   }
 
@@ -317,7 +349,7 @@ async function disburseFunds({
   }
 
   // Sandbox simulation in non-production
-  if (isSandboxNumber && (process.env.NODE_ENV !== 'production' || env === 'demo')) {
+  if (isSandboxNumber && (process.env.NODE_ENV !== 'production' || currentConfig.env === 'demo')) {
     return {
       success: true,
       simulated: true,
@@ -325,8 +357,10 @@ async function disburseFunds({
     }
   }
 
-  const token = await getToken()
-  const res = await fetch(`${baseUrl}/withdraw/`, {
+  let token = await getToken()
+  let { baseUrl, env } = getConfig()
+
+  let res = await fetch(`${baseUrl}/withdraw/`, {
     method: 'POST',
     headers: {
       'Authorization': `Token ${token}`,
@@ -334,6 +368,32 @@ async function disburseFunds({
     },
     body: JSON.stringify(payload),
   })
+
+  if (res.status === 401 || res.status === 403) {
+    cachedToken = null
+    tokenExpiresAt = 0
+
+    const isDemo = baseUrl.includes('demo')
+    const altBaseUrl = isDemo ? 'https://campay.net/api' : 'https://demo.campay.net/api'
+    console.warn(`⚠️ [Campay Disburse] Token rejected (401) on ${baseUrl}. Attempting auto-retry on ${altBaseUrl}...`)
+
+    try {
+      activeBaseUrl = altBaseUrl
+      token = await getToken()
+      baseUrl = altBaseUrl
+
+      res = await fetch(`${baseUrl}/withdraw/`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Token ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      })
+    } catch (retryErr) {
+      console.warn('⚠️ [Campay Disburse] Alternate endpoint retry failed:', retryErr.message)
+    }
+  }
 
   const data = await res.json().catch(() => ({}))
   if (res.ok && data.reference) {
@@ -345,7 +405,7 @@ async function disburseFunds({
   }
 
   const errorMsg = data.message || data.description || data.detail || (typeof data === 'object' && Object.keys(data).length > 0 ? JSON.stringify(data) : `HTTP ${res.status}`)
-  console.error(`❌ [Campay Disburse] API rejected withdrawal (${res.status}):`, errorMsg)
+  console.error(`❌ [Campay Disburse] API rejected withdrawal on ${baseUrl} (${res.status}):`, errorMsg)
   const err = new Error(`Campay payout error (${res.status}): ${errorMsg}`)
   err.status = res.status >= 400 && res.status < 500 ? 400 : 502
   throw err
@@ -406,12 +466,31 @@ async function checkCampayStatus() {
     tokenMasked: mask(config.permanentToken),
     hasWebhookKey: Boolean(config.webhookKey),
     tokenStatus: null,
+    apiVerification: null,
   }
 
   try {
     const token = await getToken()
+    const { baseUrl } = getConfig()
+    result.activeBaseUrl = baseUrl
     result.tokenStatus = 'SUCCESS'
     result.tokenPreview = `${token.slice(0, 8)}... (${token.length} chars)`
+
+    // Verify token against /balance/
+    try {
+      const verifyRes = await fetch(`${baseUrl}/balance/`, {
+        headers: { 'Authorization': `Token ${token}` }
+      })
+      const verifyData = await verifyRes.json().catch(() => ({}))
+      result.apiVerification = {
+        endpoint: `${baseUrl}/balance/`,
+        httpStatus: verifyRes.status,
+        valid: verifyRes.ok,
+        details: verifyRes.ok ? 'Token authorized' : (verifyData.detail || verifyData.message || `HTTP ${verifyRes.status}`),
+      }
+    } catch (verErr) {
+      result.apiVerification = { error: verErr.message }
+    }
   } catch (err) {
     result.tokenStatus = 'FAILED'
     result.tokenError = err.message
