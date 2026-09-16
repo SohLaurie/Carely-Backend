@@ -4,6 +4,8 @@ const crypto = require('crypto')
 let cachedToken = null
 let tokenExpiresAt = 0
 
+let activeBaseUrl = null
+
 function getConfig() {
   let baseUrl = (process.env.CAMPAY_BASE_URL || 'https://demo.campay.net/api').trim().replace(/\/+$/, '')
   // Campay API routes are at /api/token/, /api/collect/, etc.
@@ -13,13 +15,16 @@ function getConfig() {
     baseUrl = `${baseUrl}/api`
   }
 
-  const username = (process.env.CAMPAY_APP_USERNAME || process.env.CAMPAY_USERNAME || '').trim()
-  const password = (process.env.CAMPAY_APP_PASSWORD || process.env.CAMPAY_PASSWORD || '').trim()
-  const webhookKey = (process.env.CAMPAY_WEBHOOK_KEY || '').trim()
-  const env = process.env.CAMPAY_ENV || (baseUrl.includes('demo') ? 'demo' : 'production')
+  const clean = (val) => String(val || '').replace(/^["']|["']$/g, '').trim()
+  const username = clean(process.env.CAMPAY_APP_USERNAME || process.env.CAMPAY_USERNAME)
+  const password = clean(process.env.CAMPAY_APP_PASSWORD || process.env.CAMPAY_PASSWORD)
+  const webhookKey = clean(process.env.CAMPAY_WEBHOOK_KEY)
+  const effectiveBaseUrl = activeBaseUrl || baseUrl
+  const env = process.env.CAMPAY_ENV || (effectiveBaseUrl.includes('demo') ? 'demo' : 'production')
 
   return {
-    baseUrl,
+    baseUrl: effectiveBaseUrl,
+    configuredBaseUrl: baseUrl,
     username,
     password,
     webhookKey,
@@ -43,6 +48,7 @@ function formatPhone(phone) {
 
 /**
  * Obtains and caches a Campay API authentication JWT token.
+ * Includes intelligent auto-detection between Demo and Production environments.
  */
 async function getToken() {
   const now = Date.now()
@@ -55,11 +61,53 @@ async function getToken() {
     throw new Error('Campay credentials missing. Please set CAMPAY_APP_USERNAME and CAMPAY_APP_PASSWORD in environment variables.')
   }
 
-  const res = await fetch(`${baseUrl}/token/`, {
+  let res = await fetch(`${baseUrl}/token/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
   })
+
+  // If authentication failed with 400 "Unable to log in with provided credentials",
+  // check if credentials belong to the alternative environment (Demo vs Production)
+  if (res.status === 400) {
+    const errorText = await res.text()
+    if (errorText.includes('Unable to log in with provided credentials')) {
+      const isDemo = baseUrl.includes('demo')
+      const altBaseUrl = isDemo ? 'https://campay.net/api' : 'https://demo.campay.net/api'
+      console.warn(`⚠️ [Campay] Login rejected on ${isDemo ? 'DEMO' : 'LIVE'} (${baseUrl}). Checking if credentials belong to ${isDemo ? 'LIVE' : 'DEMO'} (${altBaseUrl})...`)
+
+      try {
+        const altRes = await fetch(`${altBaseUrl}/token/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        })
+
+        if (altRes.ok) {
+          const altData = await altRes.json()
+          if (altData.token) {
+            console.log(`✅ [Campay Auto-Detect] Verified credentials on ${isDemo ? 'LIVE' : 'DEMO'} (${altBaseUrl})! Switching active endpoint to ${altBaseUrl}.`)
+            activeBaseUrl = altBaseUrl
+            cachedToken = altData.token
+            const expiresIn = (altData.expires_in || 3600) * 1000
+            tokenExpiresAt = now + expiresIn
+            return cachedToken
+          }
+        }
+      } catch (altErr) {
+        console.warn('⚠️ [Campay Auto-Detect] Check error:', altErr.message)
+      }
+
+      throw new Error(`Campay authentication failed (400): Unable to log in with provided credentials.
+Checklist to resolve:
+1. Verify CAMPAY_APP_USERNAME and CAMPAY_APP_PASSWORD in Render environment variables.
+2. In your Campay dashboard, copy the "App Username" and "App Password" from the Applications tab (NOT your personal login email).
+3. If using a Demo app from https://demo.campay.net, set CAMPAY_BASE_URL=https://demo.campay.net/api.
+4. If using a Live app from https://campay.net, set CAMPAY_BASE_URL=https://campay.net/api.`)
+    } else {
+      throw new Error(`Campay authentication failed (${res.status}): ${errorText}`)
+    }
+  }
 
   if (!res.ok) {
     const errorText = await res.text()
