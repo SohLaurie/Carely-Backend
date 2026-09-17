@@ -86,6 +86,10 @@ async function getMe(userId) {
 
 // ── Update Own Profile ─────────────────────────────────────────────────────────
 async function updateMe(userId, data) {
+  // Check user role
+  const userCheck = await pool.query('SELECT role FROM users WHERE id = $1', [userId])
+  const isProvider = userCheck.rows[0]?.role === 'provider'
+
   // Update users table fields
   const userColMap = {
     firstName:         'first_name',
@@ -118,10 +122,43 @@ async function updateMe(userId, data) {
 
   if (userFields.length > 0) {
     userValues.push(userId)
-    await pool.query(
-      `UPDATE users SET ${userFields.join(', ')}, updated_at = now() WHERE id = $${userIdx}`,
-      userValues
-    )
+    try {
+      await pool.query(
+        `UPDATE users SET ${userFields.join(', ')}, updated_at = now() WHERE id = $${userIdx}`,
+        userValues
+      )
+    } catch (uErr) {
+      // If a column like bio or emergency_contact was missing, attempt update without it and warn
+      if (uErr.code === '42703') { // undefined_column
+        console.warn('Retrying user update with essential columns only due to missing column:', uErr.message)
+        const safeMap = {
+          firstName: 'first_name',
+          lastName:  'last_name',
+          phone:     'phone',
+          city:      'city',
+          photoUrl:  'photo_url',
+        }
+        const sFields = []
+        const sVals = []
+        let sIdx = 1
+        for (const [k, c] of Object.entries(safeMap)) {
+          if (data[k] !== undefined) {
+            sFields.push(`${c} = $${sIdx}`)
+            sVals.push(data[k])
+            sIdx++
+          }
+        }
+        if (sFields.length > 0) {
+          sVals.push(userId)
+          await pool.query(
+            `UPDATE users SET ${sFields.join(', ')}, updated_at = now() WHERE id = $${sIdx}`,
+            sVals
+          )
+        }
+      } else {
+        throw uErr
+      }
+    }
   }
 
   // Update providers table fields if user is a provider
@@ -162,12 +199,20 @@ async function updateMe(userId, data) {
     }
   }
 
-  if (pFields.length > 0) {
+  if (pFields.length > 0 && isProvider) {
     pValues.push(userId)
-    await pool.query(
+    const pUpdate = await pool.query(
       `UPDATE providers SET ${pFields.join(', ')}, updated_at = now() WHERE id = $${pIdx}`,
       pValues
     )
+    if (pUpdate.rowCount === 0) {
+      await pool.query(
+        `INSERT INTO providers (id, profession, bio, photo_url, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, now(), now())
+         ON CONFLICT (id) DO NOTHING`,
+        [userId, data.profession || 'Cleaner', data.bio || null, data.photoUrl || null]
+      )
+    }
   }
 
   return await getMe(userId)

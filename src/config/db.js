@@ -43,6 +43,7 @@ pool.connect((err, client, release) => {
     // Ensure extra profile columns exist on users table
     pool.query(`
       ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS bio TEXT,
         ADD COLUMN IF NOT EXISTS emergency_contact TEXT,
         ADD COLUMN IF NOT EXISTS secondary_phone TEXT,
         ADD COLUMN IF NOT EXISTS preferred_language TEXT;
