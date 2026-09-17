@@ -17,6 +17,7 @@ const availabilityRoutes = require('./modules/availability/availability.routes')
 const adminRoutes        = require('./modules/admin/admin.routes')
 const uploadRoutes       = require('./modules/upload/upload.routes')
 const discussionsRoutes  = require('./modules/discussions/discussions.routes')
+const notificationsRoutes = require('./modules/notifications/notifications.routes')
 
 const app = express()
 
@@ -62,6 +63,26 @@ app.use('/api/availability', availabilityRoutes)
 app.use('/api/admin',        adminRoutes)
 app.use('/api/upload',       uploadRoutes)
 app.use('/api/discussions',  discussionsRoutes)
+app.use('/api/notifications', notificationsRoutes)
+
+// ── Auto-Release Cron (every 5 minutes) ────────────────────────────────────────
+// Auto-completes ARRIVED sessions past their 24h deadline and marks overdue
+// SCHEDULED sessions as MISSED. Runs in-process — no external scheduler needed.
+;(function startAutoReleaseCron() {
+  const { autoReleaseExpired } = require('./modules/sessions/sessions.service')
+  const INTERVAL_MS = 5 * 60 * 1000 // 5 minutes
+  setInterval(async () => {
+    try {
+      const result = await autoReleaseExpired()
+      if (result.autoCompleted > 0 || result.markedMissed > 0) {
+        console.log(`[AutoRelease] Completed: ${result.autoCompleted}, Missed: ${result.markedMissed}, Bookings affected: ${result.affectedBookings}`)
+      }
+    } catch (err) {
+      console.warn('[AutoRelease] Error during auto-release:', err.message)
+    }
+  }, INTERVAL_MS)
+  console.log('✅ Auto-release cron started (every 5 minutes)')
+})()
 
 // ── Health Check ───────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {

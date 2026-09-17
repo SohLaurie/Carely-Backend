@@ -1,4 +1,5 @@
 const pool = require('../../config/db')
+const { createNotification } = require('../notifications/notifications.service')
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -265,6 +266,21 @@ async function verifyOtp(sessionId, code, providerId) {
     await syncBookingStatus(dbClient, session.booking_id)
 
     await dbClient.query('COMMIT')
+
+    // Notify household: provider has arrived, session in progress
+    const bookerRow = await pool.query(
+      `SELECT booker_id FROM bookings WHERE id = $1`, [session.booking_id]
+    )
+    if (bookerRow.rows[0]) {
+      await createNotification(
+        bookerRow.rows[0].booker_id,
+        'session_started',
+        'Your provider has arrived',
+        'OTP confirmed — your session is now in progress. You can confirm completion after the service.',
+        { sessionId, bookingId: session.booking_id }
+      )
+    }
+
     return updated[0]
   } catch (err) {
     await dbClient.query('ROLLBACK')
@@ -326,6 +342,20 @@ async function confirmSession(sessionId, bookerId) {
     dbClient.release()
   }
 
+  // Notify provider: client confirmed, escrow will be released
+  const providerRow = await pool.query(
+    `SELECT provider_id FROM bookings WHERE id = $1`, [session.booking_id]
+  )
+  if (providerRow.rows[0]) {
+    await createNotification(
+      providerRow.rows[0].provider_id,
+      'session_confirmed',
+      'Session confirmed — escrow released',
+      'The client confirmed session completion. Your payment for this session will be released.',
+      { sessionId, bookingId: session.booking_id }
+    )
+  }
+
   return { message: 'Session confirmed as completed. Escrow for this session will be released.' }
 }
 
@@ -368,6 +398,16 @@ async function providerCompleteSession(sessionId, providerId) {
     await syncBookingStatus(dbClient, session.booking_id)
 
     await dbClient.query('COMMIT')
+
+    // Notify household to confirm completion within 24h
+    await createNotification(
+      session.booker_id,
+      'session_completed',
+      'Provider marked session complete',
+      'Your provider has marked the session as complete. Please confirm within 24 hours to release escrow.',
+      { sessionId, bookingId: session.booking_id }
+    )
+
     return { message: 'Job marked as complete.', session: updated[0] }
   } catch (err) {
     await dbClient.query('ROLLBACK')

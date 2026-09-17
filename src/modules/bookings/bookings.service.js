@@ -1,5 +1,6 @@
 const pool = require('../../config/db')
 const { generateSessionsForBooking } = require('../sessions/sessions.service')
+const { createNotification } = require('../notifications/notifications.service')
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -82,6 +83,22 @@ async function createBooking(bookerId, data) {
       totalPrice,
       totalSessions,
     ]
+  )
+
+  // Notify the provider about the new booking request
+  const bookerRow = await pool.query(
+    `SELECT first_name, last_name FROM users WHERE id = $1`,
+    [bookerId]
+  )
+  const bookerName = bookerRow.rows[0]
+    ? `${bookerRow.rows[0].first_name} ${bookerRow.rows[0].last_name}`.trim()
+    : 'A household'
+  await createNotification(
+    providerId,
+    'booking_request',
+    'New booking request',
+    `${bookerName} has sent you a booking request for ${startDate}. Review and accept or decline.`,
+    { bookingId: rows[0].id }
   )
 
   return rows[0]
@@ -248,6 +265,22 @@ async function acceptBooking(bookingId, providerId) {
 
     await dbClient.query('COMMIT')
 
+    // Notify the household that their booking was accepted
+    const providerRow = await pool.query(
+      `SELECT u.first_name, u.last_name FROM users u WHERE u.id = $1`,
+      [providerId]
+    )
+    const providerName = providerRow.rows[0]
+      ? `${providerRow.rows[0].first_name} ${providerRow.rows[0].last_name}`.trim()
+      : 'Your provider'
+    await createNotification(
+      booking.booker_id,
+      'booking_accepted',
+      'Booking accepted! Please pay to confirm',
+      `${providerName} accepted your booking request. Complete the payment to confirm your sessions.`,
+      { bookingId }
+    )
+
     return {
       message: `Booking accepted. ${count} session(s) scheduled.`,
       bookingId,
@@ -300,6 +333,25 @@ async function cancelBooking(bookingId, userId, role) {
     [bookingId]
   )
 
+  // Notify the other party
+  const cancellerRow = await pool.query(
+    `SELECT first_name, last_name FROM users WHERE id = $1`, [userId]
+  )
+  const cancellerName = cancellerRow.rows[0]
+    ? `${cancellerRow.rows[0].first_name} ${cancellerRow.rows[0].last_name}`.trim()
+    : 'A party'
+
+  const recipientId = booking.booker_id === userId ? booking.provider_id : booking.booker_id
+  if (recipientId) {
+    await createNotification(
+      recipientId,
+      'booking_cancelled',
+      'Booking cancelled',
+      `${cancellerName} has cancelled the booking. Any escrowed funds will be refunded.`,
+      { bookingId }
+    )
+  }
+
   return { message: 'Booking cancelled successfully.' }
 }
 
@@ -335,18 +387,53 @@ async function declineBooking(bookingId, providerId) {
     [bookingId]
   )
 
+  // Notify the household
+  const providerRow = await pool.query(
+    `SELECT first_name, last_name FROM users WHERE id = $1`, [providerId]
+  )
+  const providerName = providerRow.rows[0]
+    ? `${providerRow.rows[0].first_name} ${providerRow.rows[0].last_name}`.trim()
+    : 'The provider'
+  await createNotification(
+    booking.booker_id,
+    'booking_declined',
+    'Booking request declined',
+    `${providerName} is unable to take your booking. Please explore other verified caregivers.`,
+    { bookingId }
+  )
+
   return { message: 'Booking declined. The client will be notified.' }
 }
 
 // ── Confirm Booking After Payment ──────────────────────────────────────────────
 // Called by payments service after successful escrow payment.
 async function confirmBookingAfterPayment(bookingId) {
-  await pool.query(
+  const { rows } = await pool.query(
     `UPDATE bookings
      SET status = 'confirmed', payment_status = 'paid', updated_at = now()
-     WHERE id = $1`,
+     WHERE id = $1
+     RETURNING booker_id, provider_id`,
     [bookingId]
   )
+  if (rows.length > 0) {
+    const { booker_id, provider_id } = rows[0]
+    // Notify household
+    await createNotification(
+      booker_id,
+      'payment_confirmed',
+      'Payment confirmed — escrow secured',
+      'Your payment is held securely in escrow. Your provider will arrive on the scheduled date.',
+      { bookingId }
+    )
+    // Notify provider
+    await createNotification(
+      provider_id,
+      'payment_received',
+      'Payment received — booking confirmed',
+      'The client completed payment. Your booking is confirmed. Check your schedule for the session details.',
+      { bookingId }
+    )
+  }
 }
 
 module.exports = {

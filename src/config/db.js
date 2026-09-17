@@ -48,6 +48,23 @@ pool.connect((err, client, release) => {
         ADD COLUMN IF NOT EXISTS secondary_phone TEXT,
         ADD COLUMN IF NOT EXISTS preferred_language TEXT;
     `).catch(e => console.warn('Schema check notice:', e.message))
+
+    // Ensure notifications table exists
+    pool.query(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        type VARCHAR(50) NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT,
+        metadata JSONB,
+        is_read BOOLEAN NOT NULL DEFAULT false,
+        is_archived BOOLEAN NOT NULL DEFAULT false,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);
+      CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(user_id, is_read);
+    `).catch(e => console.warn('Notifications table migration notice:', e.message))
   }
 })
 

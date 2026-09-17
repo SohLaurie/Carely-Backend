@@ -1,4 +1,5 @@
 const pool = require('../../config/db')
+const { createNotification } = require('../notifications/notifications.service')
 
 // ── Submit Review ──────────────────────────────────────────────────────────────
 async function submitReview(reviewerId, { bookingId, rating, comment, tags }) {
@@ -52,6 +53,23 @@ async function submitReview(reviewerId, { bookingId, rating, comment, tags }) {
     await recalcProviderRating(dbClient, booking.provider_id)
 
     await dbClient.query('COMMIT')
+
+    // Notify the provider about the new review
+    const reviewerRow = await pool.query(
+      `SELECT first_name, last_name FROM users WHERE id = $1`, [reviewerId]
+    )
+    const reviewerName = reviewerRow.rows[0]
+      ? `${reviewerRow.rows[0].first_name} ${reviewerRow.rows[0].last_name}`.trim()
+      : 'A client'
+    const stars = '★'.repeat(rating) + '☆'.repeat(5 - rating)
+    await createNotification(
+      booking.provider_id,
+      'new_review',
+      `New ${rating}-star review`,
+      `${reviewerName} left you a review: ${stars}${comment ? ` — "${comment.slice(0, 80)}${comment.length > 80 ? '…' : ''}"` : ''}`,
+      { bookingId, reviewerId }
+    )
+
     return review
   } catch (err) {
     await dbClient.query('ROLLBACK')
