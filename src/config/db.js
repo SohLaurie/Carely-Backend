@@ -116,13 +116,14 @@ pool.connect((err, client, release) => {
       CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id);
       CREATE INDEX IF NOT EXISTS idx_referrals_referee ON referrals(referee_id);
 
-      -- Seed existing approved providers with 20 CareCredits starter pack
+      -- Seed existing active approved providers with 80 CareCredits
       INSERT INTO carecredit_wallets (user_id, balance, held)
-      SELECT p.id, 20, 0
+      SELECT p.id, 80, 0
       FROM providers p
-      WHERE p.approval_status = 'approved'
-      ON CONFLICT (user_id) DO NOTHING;
+      WHERE p.approval_status = 'approved' AND p.subscription_paid = true
+      ON CONFLICT (user_id) DO UPDATE SET balance = 80, held = 0, updated_at = now();
     `).catch(e => console.warn('CareCredit tables migration notice:', e.message))
+
 
 
   }

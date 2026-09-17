@@ -200,10 +200,18 @@ async function handleWebhook(payload, signature) {
         [reference]
       )
       if (subRes.rows.length > 0) {
-        console.log(`🎉 [Campay Webhook] Provider ${subRes.rows[0].id} subscription activation confirmed!`)
+        const provId = subRes.rows[0].id
+        console.log(`🎉 [Campay Webhook] Provider ${provId} subscription activation confirmed!`)
+        try {
+          const { grantSubscriptionCredits } = require('../carecredits/carecredits.service')
+          await grantSubscriptionCredits(provId)
+        } catch (ccErr) {
+          console.warn('[CareCred] grantSubscriptionCredits non-fatal error:', ccErr.message)
+        }
       }
     }
     return { received: true }
+
   }
 
   const payment = rows[0]

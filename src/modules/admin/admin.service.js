@@ -303,8 +303,15 @@ async function confirmSubscriptionPayment(campayRef) {
     return { message: 'No pending subscription found for this reference.', updated: false }
   }
 
-  console.log(`🎉 [Subscription] Provider ${rows[0].id} subscription payment confirmed via Campay ref ${campayRef}`)
-  return { message: 'Subscription activated.', providerId: rows[0].id, updated: true }
+  const providerId = rows[0].id
+  console.log(`🎉 [Subscription] Provider ${providerId} subscription payment confirmed via Campay ref ${campayRef}`)
+  try {
+    const { grantSubscriptionCredits } = require('../carecredits/carecredits.service')
+    await grantSubscriptionCredits(providerId)
+  } catch (ccErr) {
+    console.warn('[CareCred] grantSubscriptionCredits non-fatal error:', ccErr.message)
+  }
+  return { message: 'Subscription activated.', providerId, updated: true }
 }
 
 // ── Get Provider Subscription Status ─────────────────────────────────────────
@@ -340,6 +347,12 @@ async function getProviderSubscriptionStatus(providerId) {
             [providerId]
           )
           p.subscription_paid = true
+          try {
+            const { grantSubscriptionCredits } = require('../carecredits/carecredits.service')
+            await grantSubscriptionCredits(providerId)
+          } catch (ccErr) {
+            console.warn('[CareCred] grantSubscriptionCredits non-fatal error:', ccErr.message)
+          }
         }
       } else {
         const tx = await campayService.getTransactionStatus(p.subscription_campay_ref)
@@ -354,12 +367,19 @@ async function getProviderSubscriptionStatus(providerId) {
             [providerId]
           )
           p.subscription_paid = true
+          try {
+            const { grantSubscriptionCredits } = require('../carecredits/carecredits.service')
+            await grantSubscriptionCredits(providerId)
+          } catch (ccErr) {
+            console.warn('[CareCred] grantSubscriptionCredits non-fatal error:', ccErr.message)
+          }
         }
       }
     } catch (e) {
       // ignore check error in case network/campay issue
     }
   }
+
 
   return {
     approvalStatus:   p.approval_status,

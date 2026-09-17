@@ -1,4 +1,4 @@
-﻿const pool = require('../../config/db')
+const pool = require('../../config/db')
 
 // ── MVP Configuration (centralized) ──────────────────────────────────────────
 const CC_CONFIG = {
@@ -272,6 +272,40 @@ async function applyPromoToBooking(bookingId, bookerId, referralCodeId, referrer
   } catch (err) { console.warn('[CareCred] applyPromoToBooking error:', err.message) }
 }
 
+async function grantSubscriptionCredits(providerId) {
+  const dbClient = await pool.connect()
+  try {
+    await dbClient.query('BEGIN')
+    const { rows: existing } = await dbClient.query(
+      `SELECT id FROM carecredit_transactions WHERE user_id = $1 AND type = 'SUBSCRIPTION_BONUS' LIMIT 1`,
+      [providerId]
+    )
+    if (existing.length > 0) {
+      await dbClient.query('COMMIT')
+      return false
+    }
+
+    await getOrCreateWallet(providerId, dbClient)
+    await dbClient.query(
+      `UPDATE carecredit_wallets SET balance = balance + 20, updated_at = now() WHERE user_id = $1`,
+      [providerId]
+    )
+    await recordTransaction(providerId, 'SUBSCRIPTION_BONUS', 20, {
+      note: '20 CareCredits welcome package for subscription activation'
+    }, dbClient)
+
+    await dbClient.query('COMMIT')
+    console.log(`🎁 [CareCred] Awarded 20 CC subscription activation bonus to provider ${providerId}`)
+    return true
+  } catch (err) {
+    await dbClient.query('ROLLBACK')
+    console.warn('[CareCred] grantSubscriptionCredits error:', err.message)
+    return false
+  } finally {
+    dbClient.release()
+  }
+}
+
 module.exports = {
   CC_CONFIG,
   getWallet,
@@ -286,4 +320,6 @@ module.exports = {
   getOrCreateReferralCode,
   validatePromoCode,
   applyPromoToBooking,
+  grantSubscriptionCredits,
 }
+
