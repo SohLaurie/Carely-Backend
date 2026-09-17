@@ -65,6 +65,66 @@ pool.connect((err, client, release) => {
       CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);
       CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(user_id, is_read);
     `).catch(e => console.warn('Notifications table migration notice:', e.message))
+
+    // Ensure CareCredit tables exist
+    pool.query(`
+      CREATE TABLE IF NOT EXISTS carecredit_wallets (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+        balance INTEGER NOT NULL DEFAULT 0,
+        held INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_cc_wallets_user ON carecredit_wallets(user_id);
+
+      CREATE TABLE IF NOT EXISTS carecredit_transactions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        type VARCHAR(30) NOT NULL,
+        amount INTEGER NOT NULL,
+        booking_id UUID REFERENCES bookings(id) ON DELETE SET NULL,
+        referral_id UUID,
+        payment_campay_ref TEXT,
+        note TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_cc_txn_user ON carecredit_transactions(user_id);
+
+      CREATE TABLE IF NOT EXISTS referral_codes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        code TEXT NOT NULL UNIQUE,
+        owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        is_active BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_codes_code ON referral_codes(code);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_codes_owner ON referral_codes(owner_id);
+
+      CREATE TABLE IF NOT EXISTS referrals (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        referral_code_id UUID NOT NULL REFERENCES referral_codes(id),
+        referrer_id UUID NOT NULL REFERENCES users(id),
+        referee_id UUID NOT NULL UNIQUE REFERENCES users(id),
+        booking_id UUID REFERENCES bookings(id) ON DELETE SET NULL,
+        discount_amount INTEGER NOT NULL DEFAULT 5,
+        reward_amount INTEGER NOT NULL DEFAULT 5,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id);
+      CREATE INDEX IF NOT EXISTS idx_referrals_referee ON referrals(referee_id);
+
+      -- Seed existing approved providers with 20 CareCredits starter pack
+      INSERT INTO carecredit_wallets (user_id, balance, held)
+      SELECT p.id, 20, 0
+      FROM providers p
+      WHERE p.approval_status = 'approved'
+      ON CONFLICT (user_id) DO NOTHING;
+    `).catch(e => console.warn('CareCredit tables migration notice:', e.message))
+
+
   }
 })
 

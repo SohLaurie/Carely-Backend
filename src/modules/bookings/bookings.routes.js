@@ -24,10 +24,14 @@ const createBookingSchema = z.object({
   subtotal:     z.number().int().positive(),
   serviceFee:   z.number().int().min(0).optional(),
   totalPrice:   z.number().int().positive(),
+  promoCode:    z.string().optional(),
+  promoReferralCodeId: z.string().uuid().optional(),
+  promoReferrerId:     z.string().uuid().optional(),
 }).refine(
   data => data.sessionType === 'once' || (data.selectedDays && data.selectedDays.length > 0),
   { message: 'Recurring bookings must specify at least one selected day.', path: ['selectedDays'] }
 )
+
 
 /**
  * POST /api/bookings

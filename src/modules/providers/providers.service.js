@@ -12,11 +12,14 @@ async function listProviders({ specialty, city, available, minRating, maxPrice, 
     idx++
     if (status === 'approved') {
       conditions.push(`p.subscription_paid = true`)
+      conditions.push(`COALESCE(cw.balance - cw.held, 0) >= 5`)
     }
   } else if (status !== 'all') {
     conditions.push(`p.approval_status = 'approved'`)
     conditions.push(`p.subscription_paid = true`)
+    conditions.push(`COALESCE(cw.balance - cw.held, 0) >= 5`)
   }
+
 
   if (specialty && specialty !== 'all') {
     conditions.push(`($${idx} = ANY(p.specialties::text[]) OR p.profession ILIKE $${idx + 1})`)
@@ -65,6 +68,7 @@ async function listProviders({ specialty, city, available, minRating, maxPrice, 
        p.approval_status, p.subscription_paid, p.created_at
      FROM providers p
      JOIN users u ON u.id = p.id
+     LEFT JOIN carecredit_wallets cw ON cw.user_id = p.id
      ${where}
      ORDER BY p.rating DESC, p.review_count DESC, p.created_at DESC
      LIMIT $${idx} OFFSET $${idx + 1}`,
@@ -72,9 +76,10 @@ async function listProviders({ specialty, city, available, minRating, maxPrice, 
   )
 
   const { rows: countRows } = await pool.query(
-    `SELECT COUNT(*) FROM providers p JOIN users u ON u.id = p.id ${where}`,
+    `SELECT COUNT(*) FROM providers p JOIN users u ON u.id = p.id LEFT JOIN carecredit_wallets cw ON cw.user_id = p.id ${where}`,
     values.slice(0, -2)
   )
+
 
   const formatted = rows.map(r => ({
     ...r,

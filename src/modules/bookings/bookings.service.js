@@ -26,6 +26,9 @@ async function createBooking(bookerId, data) {
     subtotal,
     serviceFee,
     totalPrice,
+    promoCode,
+    promoReferralCodeId,
+    promoReferrerId,
   } = data
 
   // Verify provider exists and is approved
@@ -85,6 +88,18 @@ async function createBooking(bookerId, data) {
     ]
   )
 
+  const bookingId = rows[0].id
+
+  // Apply promo code if provided and referral data is available
+  if (promoCode && promoReferralCodeId && promoReferrerId) {
+    try {
+      const { applyPromoToBooking } = require('../carecredits/carecredits.service')
+      await applyPromoToBooking(bookingId, bookerId, promoReferralCodeId, promoReferrerId)
+    } catch (ccErr) {
+      console.warn('[CareCred] applyPromoToBooking non-fatal error:', ccErr.message)
+    }
+  }
+
   // Notify the provider about the new booking request
   const bookerRow = await pool.query(
     `SELECT first_name, last_name FROM users WHERE id = $1`,
@@ -98,11 +113,12 @@ async function createBooking(bookerId, data) {
     'booking_request',
     'New booking request',
     `${bookerName} has sent you a booking request for ${startDate}. Review and accept or decline.`,
-    { bookingId: rows[0].id }
+    { bookingId }
   )
 
   return rows[0]
 }
+
 
 // ── List Bookings ──────────────────────────────────────────────────────────────
 async function listBookings(userId, role) {
@@ -292,7 +308,16 @@ async function acceptBooking(bookingId, providerId) {
   } finally {
     dbClient.release()
   }
+
+  // Hold 5 CC for this booking (non-blocking — do not fail accept on CC error)
+  try {
+    const { holdCreditsForBooking } = require('../carecredits/carecredits.service')
+    await holdCreditsForBooking(providerId, bookingId)
+  } catch (ccErr) {
+    console.warn('[CareCred] holdCreditsForBooking non-fatal error:', ccErr.message)
+  }
 }
+
 
 // ── Cancel Booking ─────────────────────────────────────────────────────────────
 async function cancelBooking(bookingId, userId, role) {
@@ -352,8 +377,19 @@ async function cancelBooking(bookingId, userId, role) {
     )
   }
 
+  // Refund held CC if provider had accepted (non-blocking)
+  if (booking.provider_id) {
+    try {
+      const { refundHeldCredits } = require('../carecredits/carecredits.service')
+      await refundHeldCredits(booking.provider_id, bookingId)
+    } catch (ccErr) {
+      console.warn('[CareCred] refundHeldCredits non-fatal error:', ccErr.message)
+    }
+  }
+
   return { message: 'Booking cancelled successfully.' }
 }
+
 
 // ── Decline Booking (Provider) ─────────────────────────────────────────────────
 // Provider explicitly rejects a pending booking (before accepting).

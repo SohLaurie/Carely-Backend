@@ -18,6 +18,8 @@ const adminRoutes        = require('./modules/admin/admin.routes')
 const uploadRoutes       = require('./modules/upload/upload.routes')
 const discussionsRoutes  = require('./modules/discussions/discussions.routes')
 const notificationsRoutes = require('./modules/notifications/notifications.routes')
+const carecreditsRoutes   = require('./modules/carecredits/carecredits.routes')
+
 
 const app = express()
 
@@ -64,6 +66,8 @@ app.use('/api/admin',        adminRoutes)
 app.use('/api/upload',       uploadRoutes)
 app.use('/api/discussions',  discussionsRoutes)
 app.use('/api/notifications', notificationsRoutes)
+app.use('/api/carecredits',  carecreditsRoutes)
+
 
 // ── Auto-Release Cron (every 5 minutes) ────────────────────────────────────────
 // Auto-completes ARRIVED sessions past their 24h deadline and marks overdue

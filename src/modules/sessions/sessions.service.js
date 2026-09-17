@@ -288,7 +288,16 @@ async function verifyOtp(sessionId, code, providerId) {
   } finally {
     dbClient.release()
   }
+
+  // Permanently consume 5 CC when booking is activated (non-blocking)
+  try {
+    const { consumeHeldCredits } = require('../carecredits/carecredits.service')
+    await consumeHeldCredits(session.provider_id, session.booking_id)
+  } catch (ccErr) {
+    console.warn('[CareCred] consumeHeldCredits non-fatal error:', ccErr.message)
+  }
 }
+
 
 // ── Confirm Session (Client confirms completion) ───────────────────────────────
 async function confirmSession(sessionId, bookerId) {
@@ -356,8 +365,17 @@ async function confirmSession(sessionId, bookerId) {
     )
   }
 
+  // Grant referral reward to referrer if applicable (non-blocking)
+  try {
+    const { addReferralReward } = require('../carecredits/carecredits.service')
+    await addReferralReward(session.booking_id)
+  } catch (ccErr) {
+    console.warn('[CareCred] addReferralReward non-fatal error:', ccErr.message)
+  }
+
   return { message: 'Session confirmed as completed. Escrow for this session will be released.' }
 }
+
 
 // ── Provider Complete Session (Provider marks job completed) ────────────────
 async function providerCompleteSession(sessionId, providerId) {
