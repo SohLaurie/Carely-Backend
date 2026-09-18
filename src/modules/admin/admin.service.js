@@ -195,54 +195,39 @@ async function approveProvider(providerId) {
     throw err
   }
 
-  // 2. Update approval_status → approved
+  // 2. Update approval_status → approved (subscription_paid remains false, no campay_ref yet)
   await pool.query(
     `UPDATE providers
-     SET approval_status = 'approved', updated_at = now()
+     SET approval_status = 'approved',
+         subscription_paid = false,
+         subscription_campay_ref = null,
+         updated_at = now()
      WHERE id = $1`,
     [providerId]
   )
 
-  // 3. Trigger Campay 25 XAF subscription collect to provider's phone
-  let campayResult = null
-  let campayError = null
-
-  if (provider.phone) {
-    try {
-      campayResult = await campayService.collectPayment({
-        amount: 25,
-        currency: 'XAF',
-        phone: provider.phone,
-        from: provider.phone,
-        description: `Carely subscription activation for ${provider.first_name} ${provider.last_name}`,
-        externalReference: `sub_${providerId}_${Date.now()}`,
-      })
-
-      if (campayResult?.reference) {
-        // Store the subscription payment reference
-        await pool.query(
-          `UPDATE providers
-           SET subscription_campay_ref = $1
-           WHERE id = $2`,
-          [campayResult.reference, providerId]
-        )
-      }
-
-      console.log(`✅ [Admin Approval] Campay subscription collect triggered for ${provider.email}:`, campayResult)
-    } catch (err) {
-      // Don't fail the approval if Campay fails — log it
-      campayError = err.message
-      console.error(`⚠️ [Admin Approval] Campay collect failed for ${provider.email}:`, err.message)
-    }
+  // 3. Dispatch in-app notification prompting provider to pay the 25 XAF activation fee
+  try {
+    const { createNotification } = require('../notifications/notifications.service')
+    await createNotification(
+      providerId,
+      'subscription_required',
+      'Application Approved! Pay Subscription to Activate',
+      'Congratulations! Your provider profile has been approved by admin. Please pay the 25 XAF subscription fee to activate your account, receive 20 CareCredits, and appear on Explore.',
+      { action: 'pay_subscription', amount: 25 }
+    )
+    console.log(`🔔 [Admin Approval] Notification sent to provider ${provider.email} (id: ${providerId})`)
+  } catch (notifErr) {
+    console.warn('⚠️ [Admin Approval] Failed to send notification:', notifErr.message)
   }
+
+  console.log(`✅ [Admin Approval] Provider ${provider.email} approved. Awaiting provider manual subscription payment.`)
 
   return {
     message: `Provider ${provider.first_name} ${provider.last_name} has been approved.`,
     providerId,
-    campayTriggered: !!campayResult,
-    campayReference: campayResult?.reference || null,
-    campayError: campayError || null,
-    note: 'Provider will receive a payment prompt. Once 25 XAF is paid, their account will be activated.',
+    campayTriggered: false,
+    note: 'Provider has been notified to pay the 25 XAF subscription fee to activate their account and receive 20 CareCredits.',
   }
 }
 
@@ -308,6 +293,14 @@ async function confirmSubscriptionPayment(campayRef) {
   try {
     const { grantSubscriptionCredits } = require('../carecredits/carecredits.service')
     await grantSubscriptionCredits(providerId)
+    const { createNotification } = require('../notifications/notifications.service')
+    await createNotification(
+      providerId,
+      'subscription_activated',
+      'Account Activated! 20 CareCredits Received',
+      'Your 25 XAF subscription payment was successful! Your account is now active, 20 CareCredits have been deposited into your wallet, and your profile is live on Explore.',
+      { action: 'view_wallet', amount: 20 }
+    )
   } catch (ccErr) {
     console.warn('[CareCred] grantSubscriptionCredits non-fatal error:', ccErr.message)
   }
@@ -350,6 +343,14 @@ async function getProviderSubscriptionStatus(providerId) {
           try {
             const { grantSubscriptionCredits } = require('../carecredits/carecredits.service')
             await grantSubscriptionCredits(providerId)
+            const { createNotification } = require('../notifications/notifications.service')
+            await createNotification(
+              providerId,
+              'subscription_activated',
+              'Account Activated! 20 CareCredits Received',
+              'Your 25 XAF subscription payment was successful! Your account is now active, 20 CareCredits have been deposited into your wallet, and your profile is live on Explore.',
+              { action: 'view_wallet', amount: 20 }
+            )
           } catch (ccErr) {
             console.warn('[CareCred] grantSubscriptionCredits non-fatal error:', ccErr.message)
           }
@@ -370,6 +371,14 @@ async function getProviderSubscriptionStatus(providerId) {
           try {
             const { grantSubscriptionCredits } = require('../carecredits/carecredits.service')
             await grantSubscriptionCredits(providerId)
+            const { createNotification } = require('../notifications/notifications.service')
+            await createNotification(
+              providerId,
+              'subscription_activated',
+              'Account Activated! 20 CareCredits Received',
+              'Your 25 XAF subscription payment was successful! Your account is now active, 20 CareCredits have been deposited into your wallet, and your profile is live on Explore.',
+              { action: 'view_wallet', amount: 20 }
+            )
           } catch (ccErr) {
             console.warn('[CareCred] grantSubscriptionCredits non-fatal error:', ccErr.message)
           }
