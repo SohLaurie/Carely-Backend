@@ -295,34 +295,8 @@ async function getTransactionStatus(reference) {
     }
 
     const data = await res.json()
-    let status = data.status // 'SUCCESSFUL' | 'FAILED' | 'PENDING'
-
-    // In demo environment, since mobile networks cannot dial demo USSD,
-    // auto-confirm any PENDING demo transactions after 5 seconds.
-    // We use the current time as upper bound — the transaction was initiated
-    // within the last few minutes so anything PENDING in demo = auto-approve.
-    if (env === 'demo' && status === 'PENDING') {
-      // Auto-confirm after 5s — the frontend polls every 4s,
-      // so on the 2nd or 3rd poll it will be marked SUCCESSFUL.
-      // Use external_reference timestamp if available, else use a fixed 5s window.
-      let isDemoReady = false
-      if (data.external_reference) {
-        const parts = data.external_reference.split('_')
-        const ts = Number(parts[parts.length - 1]) || 0
-        if (ts > 0 && Date.now() - ts > 5000) {
-          isDemoReady = true
-        } else if (ts === 0) {
-          // Campay demo returned external_reference without our timestamp — just auto-confirm
-          isDemoReady = true
-        }
-      } else {
-        // No external_reference in response — auto-confirm after 5s wait
-        isDemoReady = true
-      }
-      if (isDemoReady) {
-        status = 'SUCCESSFUL'
-      }
-    }
+    const status = data.status // 'SUCCESSFUL' | 'FAILED' | 'PENDING'
+    // Status is taken directly from Campay — real USSD payment required to reach SUCCESSFUL
 
     return {
       success: true,
