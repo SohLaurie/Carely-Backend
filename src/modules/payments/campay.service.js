@@ -368,24 +368,21 @@ async function disburseFunds({
     }
   }
 
-  // Mass Payout payload — single recipient wrapped in payouts array
+  // Direct CamPay Withdrawal payload
   const payload = {
-    payouts: [
-      {
-        amount: String(apiAmount),
-        to: formattedPhone,
-        description: description || `Carely payout ${externalReference}`,
-        external_reference: externalReference,
-      },
-    ],
+    amount: String(apiAmount),
+    currency,
+    to: formattedPhone,
+    description: description || `Carely payout ${externalReference}`,
+    external_reference: externalReference,
   }
 
   const token = await getToken()
   const { baseUrl, env } = getConfig()
 
-  console.log(`📡 [Campay Payout] Calling ${baseUrl}/mass-payout/ | env=${env} | phone=${formattedPhone} | amount=${apiAmount}`)
+  console.log(`📡 [Campay Withdraw] Calling ${baseUrl}/withdraw/ | env=${env} | phone=${formattedPhone} | amount=${apiAmount}`)
 
-  const res = await fetch(`${baseUrl}/mass-payout/`, {
+  const res = await fetch(`${baseUrl}/withdraw/`, {
     method: 'POST',
     headers: {
       'Authorization': `Token ${token}`,
@@ -395,23 +392,20 @@ async function disburseFunds({
   })
 
   const data = await res.json().catch(() => ({}))
-  console.log(`📨 [Campay Payout] HTTP ${res.status} response:`, JSON.stringify(data))
+  console.log(`📨 [Campay Withdraw] HTTP ${res.status} response:`, JSON.stringify(data))
 
-  if (res.ok) {
-    // Success: grab reference from top-level or first payout entry
-    const reference = data.reference || (data.payouts && data.payouts[0] && data.payouts[0].reference) || externalReference
-    const payoutStatus = (data.payouts && data.payouts[0] && data.payouts[0].status) || data.status || 'PENDING'
-    console.log(`✅ [Campay Payout] SUCCESS — ref=${reference} | status=${payoutStatus}`)
+  if (res.ok && data.reference) {
+    console.log(`✅ [Campay Withdraw] SUCCESS — ref=${data.reference} | status=${data.status}`)
     return {
       success: true,
-      reference,
-      status: payoutStatus,
+      reference: data.reference,
+      status: data.status || 'PENDING',
       raw: data,
     }
   }
 
   const errorMsg = data.message || data.description || data.detail || (typeof data === 'object' && Object.keys(data).length > 0 ? JSON.stringify(data) : `HTTP ${res.status}`)
-  console.error(`❌ [Campay Payout] Mass payout rejected on ${baseUrl} (${res.status}):`, errorMsg)
+  console.error(`❌ [Campay Withdraw] Withdrawal rejected on ${baseUrl} (${res.status}):`, errorMsg)
   const err = new Error(`Campay payout error (${res.status}): ${errorMsg}`)
   err.status = res.status >= 400 && res.status < 500 ? 400 : 502
   throw err
