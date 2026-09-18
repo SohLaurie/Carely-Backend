@@ -1,4 +1,4 @@
-﻿const svc = require('./carecredits.service')
+const svc = require('./carecredits.service')
 const campayService = require('../payments/campay.service')
 const pool = require('../../config/db')
 
@@ -107,28 +107,34 @@ async function withdrawCredits(req, res, next) {
     }
     if (!phoneNumber) return res.status(400).json({ error: 'Phone number is required.' })
 
-    // Deduct from wallet first (validates available balance)
-    const { fcfaAmount } = await svc.deductCreditsForWithdrawal(req.user.id, creditAmount, null)
+    // 1. Validate balance without deducting yet
+    const { fcfaAmount } = await svc.validateWithdrawal(req.user.id, creditAmount)
 
-    // Initiate Campay disbursement
-    let campayRef = null
+    // 2. Initiate Campay disbursement (Mass Payout API)
+    const ref = `CW-${req.user.id.slice(0, 8)}-${Date.now()}`
+    let payoutResult
     try {
-      const ref = `CW-${req.user.id.slice(0, 8)}-${Date.now()}`
-      await campayService.disburseFunds({
+      payoutResult = await campayService.disburseFunds({
         amount: fcfaAmount,
         currency: 'XAF',
         phone: phoneNumber,
         description: `Carely CareCredit withdrawal: ${creditAmount} CC -> ${fcfaAmount} FCFA`,
         externalReference: ref,
       })
-      campayRef = ref
     } catch (disbursErr) {
-      console.warn('[CareCred] Disburse failed — CC already deducted:', disbursErr.message)
+      console.error('[CareCred] Disburse failed — CC balance untouched:', disbursErr.message)
+      return res.status(502).json({
+        error: `Withdrawal payout failed: ${disbursErr.message}. Your CareCredits were not deducted.`,
+      })
     }
+
+    // 3. Only deduct credits after payout is confirmed
+    const campayRef = payoutResult?.reference || ref
+    await svc.deductCreditsForWithdrawal(req.user.id, creditAmount, campayRef)
 
     const wallet = await svc.getWallet(req.user.id)
     res.json({
-      message: `Withdrawal of ${creditAmount} CC (${fcfaAmount} FCFA) initiated to ${phoneNumber}.`,
+      message: `Withdrawal of ${creditAmount} CC (${fcfaAmount} FCFA) sent to ${phoneNumber}.`,
       fcfaAmount,
       creditAmount,
       campayRef,

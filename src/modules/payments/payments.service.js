@@ -245,12 +245,42 @@ async function handleWebhook(payload, signature) {
 // ── Release Escrow (Admin) ─────────────────────────────────────────────────────
 async function releaseEscrow(bookingId) {
   const { rows } = await pool.query(
-    `SELECT * FROM payments WHERE booking_id = $1 AND status = 'held_in_escrow'`,
+    `SELECT p.*, b.provider_id, u.phone AS provider_phone, u.first_name AS provider_first_name, u.last_name AS provider_last_name
+     FROM payments p
+     JOIN bookings b ON b.id = p.booking_id
+     JOIN users u ON u.id = b.provider_id
+     WHERE p.booking_id = $1 AND p.status = 'held_in_escrow'`,
     [bookingId]
   )
   if (rows.length === 0) {
     const err = new Error('No escrowed payment found for this booking.')
     err.status = 404
+    throw err
+  }
+
+  const payment = rows[0]
+  const targetPhone = payment.provider_phone
+  if (!targetPhone) {
+    const err = new Error('Provider phone number not found for escrow release payout.')
+    err.status = 400
+    throw err
+  }
+
+  // Release funds to provider phone via Campay Mass Payout
+  const ref = `ESCROW-REL-${bookingId.slice(0, 8)}-${Date.now()}`
+  let payoutResult
+  try {
+    payoutResult = await campayService.disburseFunds({
+      amount: payment.amount,
+      currency: 'XAF',
+      phone: targetPhone,
+      description: `Carely escrow payout for booking #${bookingId.slice(0, 8)} to ${payment.provider_first_name || ''} ${payment.provider_last_name || ''}`.trim(),
+      externalReference: ref,
+    })
+  } catch (payoutErr) {
+    console.error(`❌ [Release Escrow] Payout failed:`, payoutErr.message)
+    const err = new Error(`Escrow payout failed: ${payoutErr.message}. Payment remains held in escrow.`)
+    err.status = 502
     throw err
   }
 
@@ -263,8 +293,9 @@ async function releaseEscrow(bookingId) {
   )
 
   return {
-    message: 'Escrow released. Funds transferred to provider.',
+    message: `Escrow released. ${payment.amount} XAF transferred to provider (${targetPhone}).`,
     payment: updated,
+    payoutRef: payoutResult?.reference || ref,
   }
 }
 

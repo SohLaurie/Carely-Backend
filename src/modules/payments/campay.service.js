@@ -325,7 +325,8 @@ async function getTransactionStatus(reference) {
 
 
 /**
- * Disburse / withdraw funds to a provider or client (Escrow Release / Refund).
+ * Send funds to a provider or client via CamPay Mass Payout API.
+ * Uses /mass-payout/ (works on demo) instead of /withdraw/ (demo-broken).
  *
  * @param {Object} params
  * @param {number|string} params.amount
@@ -352,20 +353,14 @@ async function disburseFunds({
 
   const currentConfig = getConfig()
   let apiAmount = Math.round(Number(amount))
+  // CamPay demo enforces max 25 XAF per payout recipient
   if (currentConfig.env === 'demo' && apiAmount > 25) {
-    apiAmount = 10
+    apiAmount = 25
   }
 
-  const payload = {
-    amount: String(apiAmount),
-    currency,
-    to: formattedPhone,
-    description: description || `Carely escrow payout ${externalReference}`,
-    external_reference: externalReference,
-  }
-
-  // Sandbox simulation in non-production
+  // Sandbox simulation for test numbers
   if (isSandboxNumber && (process.env.NODE_ENV !== 'production' || currentConfig.env === 'demo')) {
+    console.log(`🧪 [Campay Payout] Sandbox phone ${formattedPhone} — simulating payout.`)
     return {
       success: true,
       simulated: true,
@@ -373,10 +368,24 @@ async function disburseFunds({
     }
   }
 
-  let token = await getToken()
-  let { baseUrl, env } = getConfig()
+  // Mass Payout payload — single recipient wrapped in payouts array
+  const payload = {
+    payouts: [
+      {
+        amount: String(apiAmount),
+        to: formattedPhone,
+        description: description || `Carely payout ${externalReference}`,
+        external_reference: externalReference,
+      },
+    ],
+  }
 
-  let res = await fetch(`${baseUrl}/withdraw/`, {
+  const token = await getToken()
+  const { baseUrl, env } = getConfig()
+
+  console.log(`📡 [Campay Payout] Calling ${baseUrl}/mass-payout/ | env=${env} | phone=${formattedPhone} | amount=${apiAmount}`)
+
+  const res = await fetch(`${baseUrl}/mass-payout/`, {
     method: 'POST',
     headers: {
       'Authorization': `Token ${token}`,
@@ -385,43 +394,24 @@ async function disburseFunds({
     body: JSON.stringify(payload),
   })
 
-  if (res.status === 401 || res.status === 403) {
-    cachedToken = null
-    tokenExpiresAt = 0
-
-    const isDemo = baseUrl.includes('demo')
-    const altBaseUrl = isDemo ? 'https://campay.net/api' : 'https://demo.campay.net/api'
-    console.warn(`⚠️ [Campay Disburse] Token rejected (401) on ${baseUrl}. Attempting auto-retry on ${altBaseUrl}...`)
-
-    try {
-      activeBaseUrl = altBaseUrl
-      token = await getToken()
-      baseUrl = altBaseUrl
-
-      res = await fetch(`${baseUrl}/withdraw/`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Token ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      })
-    } catch (retryErr) {
-      console.warn('⚠️ [Campay Disburse] Alternate endpoint retry failed:', retryErr.message)
-    }
-  }
-
   const data = await res.json().catch(() => ({}))
-  if (res.ok && data.reference) {
+  console.log(`📨 [Campay Payout] HTTP ${res.status} response:`, JSON.stringify(data))
+
+  if (res.ok) {
+    // Success: grab reference from top-level or first payout entry
+    const reference = data.reference || (data.payouts && data.payouts[0] && data.payouts[0].reference) || externalReference
+    const payoutStatus = (data.payouts && data.payouts[0] && data.payouts[0].status) || data.status || 'PENDING'
+    console.log(`✅ [Campay Payout] SUCCESS — ref=${reference} | status=${payoutStatus}`)
     return {
       success: true,
-      reference: data.reference,
+      reference,
+      status: payoutStatus,
       raw: data,
     }
   }
 
   const errorMsg = data.message || data.description || data.detail || (typeof data === 'object' && Object.keys(data).length > 0 ? JSON.stringify(data) : `HTTP ${res.status}`)
-  console.error(`❌ [Campay Disburse] API rejected withdrawal on ${baseUrl} (${res.status}):`, errorMsg)
+  console.error(`❌ [Campay Payout] Mass payout rejected on ${baseUrl} (${res.status}):`, errorMsg)
   const err = new Error(`Campay payout error (${res.status}): ${errorMsg}`)
   err.status = res.status >= 400 && res.status < 500 ? 400 : 502
   throw err

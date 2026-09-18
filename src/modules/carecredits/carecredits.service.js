@@ -90,6 +90,23 @@ async function addCreditsAfterPurchase(userId, creditAmount, campayRef) {
   finally { dbClient.release() }
 }
 
+async function validateWithdrawal(userId, creditAmount) {
+  if (creditAmount <= 0 || creditAmount % CC_CONFIG.CC_PER_WITHDRAWAL_PACK !== 0) {
+    const err = new Error(`Withdrawal must be a multiple of ${CC_CONFIG.CC_PER_WITHDRAWAL_PACK} CC.`)
+    err.status = 400
+    throw err
+  }
+  const wallet = await getWallet(userId)
+  const available = wallet.balance - wallet.held
+  if (available < creditAmount) {
+    const err = new Error(`Insufficient available credits. You have ${available} CC available.`)
+    err.status = 400
+    throw err
+  }
+  const fcfaAmount = (creditAmount / CC_CONFIG.CC_PER_WITHDRAWAL_PACK) * CC_CONFIG.FCFA_PER_WITHDRAWAL_PACK
+  return { fcfaAmount, available, balance: wallet.balance }
+}
+
 async function deductCreditsForWithdrawal(userId, creditAmount, campayRef) {
   if (creditAmount <= 0 || creditAmount % CC_CONFIG.CC_PER_WITHDRAWAL_PACK !== 0) {
     const err = new Error(`Withdrawal must be a multiple of ${CC_CONFIG.CC_PER_WITHDRAWAL_PACK} CC.`)
@@ -312,6 +329,7 @@ module.exports = {
   getTransactions,
   getMonthlyStats,
   addCreditsAfterPurchase,
+  validateWithdrawal,
   deductCreditsForWithdrawal,
   holdCreditsForBooking,
   consumeHeldCredits,
