@@ -81,14 +81,18 @@ async function getToken() {
     body: JSON.stringify({ username, password }),
   })
 
-  // If authentication failed with 400 "Unable to log in with provided credentials",
-  // check if credentials belong to the alternative environment (Demo vs Production)
-  if (res.status === 400) {
+  // If authentication failed on the configured URL (400, 401, 403, 404, etc.),
+  // check if credentials belong to the alternative environment (Demo vs Production).
+  if (!res.ok) {
     const errorText = await res.text()
-    if (errorText.includes('Unable to log in with provided credentials')) {
+    const isCredentialError = res.status === 400 && errorText.includes('Unable to log in with provided credentials')
+    const isEndpointError = res.status === 404 || res.status === 401 || res.status === 403
+    const shouldTryAlt = isCredentialError || isEndpointError
+
+    if (shouldTryAlt) {
       const isDemo = baseUrl.includes('demo')
       const altBaseUrl = isDemo ? 'https://campay.net/api' : 'https://demo.campay.net/api'
-      console.warn(`⚠️ [Campay] Login rejected on ${isDemo ? 'DEMO' : 'LIVE'} (${baseUrl}). Checking if credentials belong to ${isDemo ? 'LIVE' : 'DEMO'} (${altBaseUrl})...`)
+      console.warn(`⚠️ [Campay] Auth failed (${res.status}) on ${isDemo ? 'DEMO' : 'LIVE'} (${baseUrl}). Trying ${isDemo ? 'LIVE' : 'DEMO'} (${altBaseUrl})...`)
 
       try {
         const altRes = await fetch(`${altBaseUrl}/token/`, {
@@ -111,21 +115,15 @@ async function getToken() {
       } catch (altErr) {
         console.warn('⚠️ [Campay Auto-Detect] Check error:', altErr.message)
       }
-
-      throw new Error(`Campay authentication failed (400): Unable to log in with provided credentials.
-Checklist to resolve:
-1. Verify CAMPAY_APP_USERNAME and CAMPAY_APP_PASSWORD in Render environment variables.
-2. In your Campay dashboard, copy the "App Username" and "App Password" from the Applications tab (NOT your personal login email).
-3. If using a Demo app from https://demo.campay.net, set CAMPAY_BASE_URL=https://demo.campay.net/api.
-4. If using a Live app from https://campay.net, set CAMPAY_BASE_URL=https://campay.net/api.`)
-    } else {
-      throw new Error(`Campay authentication failed (${res.status}): ${errorText}`)
     }
-  }
 
-  if (!res.ok) {
-    const errorText = await res.text()
-    throw new Error(`Campay authentication failed (${res.status}): ${errorText}`)
+    throw new Error(`Campay authentication failed (${res.status}): ${errorText.slice(0, 300)}
+------
+Fix: Go to your Render dashboard → Environment → add these variables:
+  CAMPAY_BASE_URL = https://demo.campay.net/api
+  CAMPAY_ENV = demo
+  CAMPAY_USERNAME = <your demo app username>
+  CAMPAY_PASSWORD = <your demo app password>`)
   }
 
   const data = await res.json()
