@@ -14,11 +14,14 @@ async function registerClient(req, res, next) {
 }
 
 // ── POST /api/auth/register/provider ──────────────────────────────────────────
-// If the request has a valid auth token (req.user set by auth middleware),
-// it's an upgrade. Otherwise it's a fresh provider registration.
+// Only treat as an account upgrade if req.user is present AND req.body.isUpgrade === true.
+// If req.body.email is provided for a fresh registration, it ALWAYS creates a new provider.
 async function registerProvider(req, res, next) {
   try {
-    const existingUserId = req.user ? req.user.id : null
+    let existingUserId = null
+    if (req.user && req.body.isUpgrade === true) {
+      existingUserId = req.user.id
+    }
     const result = await authService.registerProvider(req.body, existingUserId)
 
     const message = existingUserId
@@ -30,6 +33,7 @@ async function registerProvider(req, res, next) {
     next(err)
   }
 }
+
 
 // ── POST /api/auth/login ───────────────────────────────────────────────────────
 async function login(req, res, next) {
