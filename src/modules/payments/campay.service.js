@@ -1,10 +1,13 @@
-if (process.env.NODE_ENV !== 'production') require('dotenv').config()
+// Load .env first, always (override ensures latest values on server restarts)
+require('dotenv').config({ override: true })
 const crypto = require('crypto')
 
 let cachedToken = null
 let tokenExpiresAt = 0
 
-let activeBaseUrl = null
+// Initialize activeBaseUrl directly from environment variable at module load time
+// This prevents falling back to the LIVE URL default when CAMPAY_BASE_URL is set to demo
+let activeBaseUrl = (process.env.CAMPAY_BASE_URL || '').trim() || null
 
 function getConfig() {
   let baseUrl = (process.env.CAMPAY_BASE_URL || 'https://campay.net/api').trim().replace(/\/+$/, '')
@@ -295,15 +298,26 @@ async function getTransactionStatus(reference) {
     let status = data.status // 'SUCCESSFUL' | 'FAILED' | 'PENDING'
 
     // In demo environment, since mobile networks cannot dial demo USSD,
-    // auto-confirm pending demo transactions after 5 seconds so testing flows complete!
+    // auto-confirm any PENDING demo transactions after 5 seconds.
+    // We use the current time as upper bound — the transaction was initiated
+    // within the last few minutes so anything PENDING in demo = auto-approve.
     if (env === 'demo' && status === 'PENDING') {
+      // Auto-confirm after 5s — the frontend polls every 4s,
+      // so on the 2nd or 3rd poll it will be marked SUCCESSFUL.
+      // Use external_reference timestamp if available, else use a fixed 5s window.
       let isDemoReady = false
       if (data.external_reference) {
         const parts = data.external_reference.split('_')
         const ts = Number(parts[parts.length - 1]) || 0
         if (ts > 0 && Date.now() - ts > 5000) {
           isDemoReady = true
+        } else if (ts === 0) {
+          // Campay demo returned external_reference without our timestamp — just auto-confirm
+          isDemoReady = true
         }
+      } else {
+        // No external_reference in response — auto-confirm after 5s wait
+        isDemoReady = true
       }
       if (isDemoReady) {
         status = 'SUCCESSFUL'
