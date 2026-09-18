@@ -197,6 +197,8 @@ async function collectPayment({
   let token = await getToken()
   let { baseUrl, env } = getConfig()
 
+  console.log(`📡 [Campay Collect] Calling ${baseUrl}/collect/ | env=${env} | phone=${payload.from} | amount=${payload.amount}`)
+
   let res = await fetch(`${baseUrl}/collect/`, {
     method: 'POST',
     headers: {
@@ -235,7 +237,11 @@ async function collectPayment({
 
   const data = await res.json().catch(() => ({}))
 
+  // Log the full response so we can diagnose in production
+  console.log(`📨 [Campay Collect] HTTP ${res.status} response:`, JSON.stringify(data))
+
   if (res.ok && data.reference) {
+    console.log(`✅ [Campay Collect] SUCCESS — ref=${data.reference} | operator=${data.operator} | ussd_code=${data.ussd_code || 'none'}`)
     return {
       success: true,
       reference: data.reference,
