@@ -44,6 +44,24 @@ router.get('/me/subscription-status', auth, requireRole('provider'), ctrl.getSub
 router.post('/me/pay-subscription', auth, requireRole('provider'), ctrl.paySubscription)
 
 /**
+ * GET /api/providers/me/certification-status
+ * Provider: check their certification approval and badge payment status.
+ */
+router.get('/me/certification-status', auth, requireRole('provider'), ctrl.getCertificationStatus)
+
+/**
+ * POST /api/providers/me/request-certification
+ * Provider: submit educational credentials for certification.
+ */
+router.post('/me/request-certification', auth, requireRole('provider'), ctrl.requestCertification)
+
+/**
+ * POST /api/providers/me/pay-certification
+ * Provider: initiate 25 XAF certification badge payment via Campay.
+ */
+router.post('/me/pay-certification', auth, requireRole('provider'), ctrl.payCertification)
+
+/**
  * GET /api/providers/:id
  * Public: get a single provider profile with their reviews.
  */

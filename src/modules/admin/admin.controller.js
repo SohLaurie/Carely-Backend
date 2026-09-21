@@ -51,6 +51,38 @@ async function rejectProvider(req, res, next) {
   }
 }
 
+// GET /api/admin/certifications?status=all|pending|approved|rejected
+async function listCertificationApplications(req, res, next) {
+  try {
+    const { status } = req.query
+    const result = await adminService.listCertificationApplications({ status })
+    res.json(result)
+  } catch (err) {
+    next(err)
+  }
+}
+
+// PATCH /api/admin/certifications/:id/approve
+async function approveCertification(req, res, next) {
+  try {
+    const result = await adminService.approveCertification(req.params.id)
+    res.json(result)
+  } catch (err) {
+    next(err)
+  }
+}
+
+// PATCH /api/admin/certifications/:id/reject
+async function rejectCertification(req, res, next) {
+  try {
+    const { reason } = req.body || {}
+    const result = await adminService.rejectCertification(req.params.id, reason)
+    res.json(result)
+  } catch (err) {
+    next(err)
+  }
+}
+
 // POST /api/admin/subscription/confirm
 // Internal webhook: called when Campay confirms 25 XAF subscription payment
 async function confirmSubscription(req, res, next) {
@@ -171,6 +203,9 @@ async function updateUser2FA(req, res, next) {
 module.exports = {
   listProviders,
   listPendingProviders,
+  listCertificationApplications,
+  approveCertification,
+  rejectCertification,
   listUsers,
   approveProvider,
   rejectProvider,

@@ -39,6 +39,24 @@ router.patch('/providers/:id/approve', ctrl.approveProvider)
 router.patch('/providers/:id/reject', ctrl.rejectProvider)
 
 /**
+ * GET /api/admin/certifications
+ * List certification applications with optional status filter (?status=all|pending|approved|rejected)
+ */
+router.get('/certifications', ctrl.listCertificationApplications)
+
+/**
+ * PATCH /api/admin/certifications/:id/approve
+ * Approve a provider certification request.
+ */
+router.patch('/certifications/:id/approve', ctrl.approveCertification)
+
+/**
+ * PATCH /api/admin/certifications/:id/reject
+ * Reject a provider certification request.
+ */
+router.patch('/certifications/:id/reject', ctrl.rejectCertification)
+
+/**
  * POST /api/admin/subscription/confirm
  * Campay webhook confirms subscription payment was SUCCESSFUL.
  */

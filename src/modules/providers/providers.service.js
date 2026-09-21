@@ -65,7 +65,9 @@ async function listProviders({ specialty, city, available, minRating, maxPrice, 
        p.experience_yrs, p.experience, p.languages,
        p.certifications, p.is_available,
        p.rating, p.review_count, p.response_time,
-       p.approval_status, p.subscription_paid, p.created_at
+       p.approval_status, p.subscription_paid, p.created_at,
+       p.certification_status, p.is_certified, p.certification_paid,
+       p.certification_title, p.certification_institution
      FROM providers p
      JOIN users u ON u.id = p.id
      LEFT JOIN carecredit_wallets cw ON cw.user_id = p.id
@@ -109,7 +111,10 @@ async function getProvider(providerId) {
        p.experience_yrs, p.experience, p.languages,
        p.certifications, p.is_available,
        p.rating, p.review_count, p.response_time,
-       p.approval_status, p.subscription_paid, p.created_at
+       p.approval_status, p.subscription_paid, p.created_at,
+       p.certification_status, p.is_certified, p.certification_paid,
+       p.certification_title, p.certification_institution,
+       p.certification_document_url, p.certification_document_name, p.certification_notes
      FROM providers p
      JOIN users u ON u.id = p.id
      WHERE p.id = $1`,

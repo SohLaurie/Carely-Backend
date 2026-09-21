@@ -480,6 +480,461 @@ function buildStatusMessage(approvalStatus, subscriptionPaid) {
   return 'Unknown status.'
 }
 
+// ── Certification Applications (Admin) ─────────────────────────────────────────
+
+async function listCertificationApplications({ status } = {}) {
+  let statusFilter = ''
+  const values = []
+
+  if (status && status !== 'all' && status !== 'all applications') {
+    values.push(status.toLowerCase())
+    statusFilter = `AND LOWER(p.certification_status) = $1`
+  } else {
+    statusFilter = `AND p.certification_status IN ('pending', 'approved', 'rejected')`
+  }
+
+  const query = `
+    SELECT
+      u.id,
+      u.first_name,
+      u.last_name,
+      u.email,
+      u.phone,
+      u.city,
+      u.created_at AS user_created_at,
+      u.date_of_birth AS user_dob,
+      u.gender AS user_gender,
+      p.specialties,
+      p.bio,
+      p.experience_yrs,
+      p.experience,
+      p.price_per_hour,
+      p.location,
+      p.service_area,
+      p.service_radius,
+      p.languages,
+      p.approval_status,
+      p.subscription_paid,
+      p.profession,
+      p.date_of_birth,
+      p.gender,
+      p.reference_name,
+      p.reference_phone,
+      p.id_document_url,
+      p.id_document_name,
+      p.police_clearance_url,
+      p.police_clearance_name,
+      p.certification_status,
+      p.is_certified,
+      p.certification_paid,
+      p.certification_campay_ref,
+      p.certification_title,
+      p.certification_institution,
+      p.certification_document_url,
+      p.certification_document_name,
+      p.certification_notes,
+      p.certification_applied_at,
+      p.certification_reviewed_at
+    FROM users u
+    JOIN providers p ON p.id = u.id
+    WHERE u.role = 'provider'
+      AND u.is_active = true
+      AND u.email NOT LIKE '%@carely.cm'
+      AND u.email NOT LIKE '%@test.com'
+      AND u.email NOT LIKE '%@carelytest.com'
+      ${statusFilter}
+    ORDER BY
+      CASE WHEN p.certification_status = 'pending' THEN 0 ELSE 1 END,
+      p.certification_applied_at DESC NULLS LAST,
+      u.created_at DESC
+  `
+
+  const countQuery = `
+    SELECT
+      COUNT(*) AS total_all,
+      COUNT(*) FILTER (WHERE p.certification_status = 'pending') AS total_pending,
+      COUNT(*) FILTER (WHERE p.certification_status = 'approved') AS total_approved,
+      COUNT(*) FILTER (WHERE p.certification_status = 'rejected') AS total_rejected
+    FROM users u
+    JOIN providers p ON p.id = u.id
+    WHERE u.role = 'provider'
+      AND u.is_active = true
+      AND p.certification_status IN ('pending', 'approved', 'rejected')
+      AND u.email NOT LIKE '%@carely.cm'
+      AND u.email NOT LIKE '%@test.com'
+      AND u.email NOT LIKE '%@carelytest.com'
+  `
+
+  const [{ rows }, countsResult] = await Promise.all([
+    pool.query(query, values),
+    pool.query(countQuery)
+  ])
+
+  const countsRow = countsResult.rows[0] || {}
+  const counts = {
+    all: parseInt(countsRow.total_all) || 0,
+    pending: parseInt(countsRow.total_pending) || 0,
+    approved: parseInt(countsRow.total_approved) || 0,
+    rejected: parseInt(countsRow.total_rejected) || 0,
+  }
+
+  const providers = rows.map(r => {
+    const specialties = parsePgArray(r.specialties)
+    const languages = parsePgArray(r.languages)
+    return {
+      id:               r.id,
+      firstName:        r.first_name,
+      lastName:         r.last_name,
+      name:             `${r.first_name} ${r.last_name}`.trim(),
+      email:            r.email,
+      phone:            r.phone,
+      city:             r.city,
+      submittedAt:      r.certification_applied_at || r.user_created_at,
+      specialties,
+      bio:              r.bio || '',
+      experienceYrs:    r.experience_yrs,
+      experience:       r.experience || (r.experience_yrs ? `${r.experience_yrs} years` : 'Not specified'),
+      location:         r.location || r.city || 'Cameroon',
+      serviceArea:      r.service_area || 'Cameroon',
+      serviceRadius:    r.service_radius || '15 km',
+      languages,
+      dob:              r.date_of_birth || (r.user_dob ? new Date(r.user_dob).toISOString().split('T')[0] : 'Not specified'),
+      gender:           r.gender || r.user_gender || 'Not specified',
+      referenceName:    r.reference_name || 'Not provided',
+      referencePhone:   r.reference_phone || 'Not provided',
+      idDocumentUrl:       r.id_document_url || null,
+      idDocumentName:      r.id_document_name || null,
+      policeClearanceUrl:  r.police_clearance_url || null,
+      policeClearanceName: r.police_clearance_name || null,
+      certificateUrl:      r.certification_document_url || null,
+      certificateName:     r.certification_document_name || null,
+      certificationTitle:  r.certification_title || null,
+      certificationInstitution: r.certification_institution || null,
+      certificationNotes:  r.certification_notes || null,
+      pricePerHour:     r.price_per_hour || 500,
+      hourlyRate:       r.price_per_hour || 500,
+      approvalStatus:   r.certification_status || 'pending',
+      status:           r.certification_status || 'pending',
+      certificationStatus: r.certification_status,
+      isCertified:      r.is_certified,
+      certificationPaid:r.certification_paid,
+      initials:         `${r.first_name?.[0] ?? ''}${r.last_name?.[0] ?? ''}`.toUpperCase(),
+      profession:       r.profession || mapCategory(specialties),
+      category:         r.profession || mapCategory(specialties),
+      isCertificationApplication: true,
+    }
+  })
+
+  return { providers, total: providers.length, counts }
+}
+
+async function approveCertification(providerId) {
+  const { rows } = await pool.query(
+    `SELECT u.id, u.first_name, u.last_name, u.email, p.certification_status
+     FROM users u
+     JOIN providers p ON p.id = u.id
+     WHERE u.id = $1`,
+    [providerId]
+  )
+
+  if (rows.length === 0) {
+    const err = new Error('Provider not found.')
+    err.status = 404
+    throw err
+  }
+
+  const provider = rows[0]
+  if (provider.certification_status !== 'pending') {
+    const err = new Error(`Certification is already ${provider.certification_status}.`)
+    err.status = 409
+    throw err
+  }
+
+  await pool.query(
+    `UPDATE providers
+     SET certification_status = 'approved',
+         certification_reviewed_at = now(),
+         updated_at = now()
+     WHERE id = $1`,
+    [providerId]
+  )
+
+  try {
+    const { createNotification } = require('../notifications/notifications.service')
+    await createNotification(
+      providerId,
+      'certification_approved',
+      'Certification Approved! Activate Your Badge',
+      'Congratulations! Your professional certification has been approved by admin. Please pay the 25 XAF badge activation fee to display the Certified badge on your profile.',
+      { action: 'pay_certification', amount: 25 }
+    )
+  } catch (notifErr) {
+    console.warn('⚠️ [Admin Approval] Failed to send certification notification:', notifErr.message)
+  }
+
+  return {
+    message: `Certification approved for ${provider.first_name} ${provider.last_name}. Provider notified to pay 25 XAF badge fee.`,
+    providerId,
+    certificationStatus: 'approved',
+  }
+}
+
+async function rejectCertification(providerId, reason = null) {
+  const { rows } = await pool.query(
+    `SELECT u.id, u.first_name, u.last_name, u.email, p.certification_status
+     FROM users u
+     JOIN providers p ON p.id = u.id
+     WHERE u.id = $1`,
+    [providerId]
+  )
+
+  if (rows.length === 0) {
+    const err = new Error('Provider not found.')
+    err.status = 404
+    throw err
+  }
+
+  const provider = rows[0]
+
+  await pool.query(
+    `UPDATE providers
+     SET certification_status = 'rejected',
+         certification_reviewed_at = now(),
+         updated_at = now()
+     WHERE id = $1`,
+    [providerId]
+  )
+
+  try {
+    const { createNotification } = require('../notifications/notifications.service')
+    await createNotification(
+      providerId,
+      'certification_rejected',
+      'Certification Request Update',
+      reason || 'Your certification application could not be verified with the provided documents. You may re-apply with additional documentation.',
+      { action: 'request_certification' }
+    )
+  } catch (notifErr) {
+    console.warn('⚠️ [Admin Rejection] Failed to send certification notification:', notifErr.message)
+  }
+
+  return {
+    message: `Certification rejected for ${provider.first_name} ${provider.last_name}.`,
+    providerId,
+    certificationStatus: 'rejected',
+  }
+}
+
+async function requestProviderCertification(providerId, { title, institution, documentUrl, documentName, notes } = {}) {
+  const { rows } = await pool.query(
+    `SELECT u.id, u.first_name, u.last_name, u.email, p.approval_status, p.certification_status
+     FROM users u
+     JOIN providers p ON p.id = u.id
+     WHERE u.id = $1`,
+    [providerId]
+  )
+
+  if (rows.length === 0) {
+    const err = new Error('Provider not found.')
+    err.status = 404
+    throw err
+  }
+
+  const provider = rows[0]
+  if (provider.approval_status !== 'approved') {
+    const err = new Error('Only verified providers can request certification.')
+    err.status = 400
+    throw err
+  }
+
+  await pool.query(
+    `UPDATE providers
+     SET certification_status = 'pending',
+         certification_title = $1,
+         certification_institution = $2,
+         certification_document_url = $3,
+         certification_document_name = $4,
+         certification_notes = $5,
+         certification_applied_at = now(),
+         is_certified = false,
+         certification_paid = false,
+         certification_campay_ref = null,
+         updated_at = now()
+     WHERE id = $6`,
+    [title || null, institution || null, documentUrl || null, documentName || null, notes || null, providerId]
+  )
+
+  // Notify Admins
+  try {
+    const { createNotification } = require('../notifications/notifications.service')
+    const { rows: admins } = await pool.query(`SELECT id FROM users WHERE role = 'admin'`)
+    for (const admin of admins) {
+      await createNotification(
+        admin.id,
+        'new_certification_request',
+        'New Certification Application',
+        `${provider.first_name} ${provider.last_name} submitted educational credentials for certification review.`,
+        { providerId, action: 'review_certification' }
+      )
+    }
+  } catch (notifErr) {
+    console.warn('⚠️ Failed to send admin certification notification:', notifErr.message)
+  }
+
+  return {
+    message: 'Certification request submitted successfully. Admin has been notified for review.',
+    certificationStatus: 'pending',
+  }
+}
+
+async function getProviderCertificationStatus(providerId) {
+  const { rows } = await pool.query(
+    `SELECT u.id, u.first_name, u.last_name, u.phone,
+            p.approval_status, p.certification_status, p.is_certified,
+            p.certification_paid, p.certification_campay_ref,
+            p.certification_title, p.certification_institution,
+            p.certification_document_url, p.certification_document_name,
+            p.certification_notes, p.certification_applied_at, p.certification_reviewed_at
+     FROM users u
+     JOIN providers p ON p.id = u.id
+     WHERE u.id = $1`,
+    [providerId]
+  )
+
+  if (rows.length === 0) {
+    const err = new Error('Provider not found.')
+    err.status = 404
+    throw err
+  }
+
+  const p = rows[0]
+
+  // If approved and not marked paid, but has campay ref, verify status
+  if (p.certification_status === 'approved' && !p.certification_paid && p.certification_campay_ref) {
+    try {
+      if (p.certification_campay_ref.startsWith('CAMPAY-')) {
+        const parts = p.certification_campay_ref.split('-')
+        const ts = Number(parts[parts.length - 1]) || 0
+        if (Date.now() - ts > 5000) {
+          await pool.query(
+            `UPDATE providers SET certification_paid = true, is_certified = true, updated_at = now() WHERE id = $1`,
+            [providerId]
+          )
+          p.certification_paid = true
+          p.is_certified = true
+          const { createNotification } = require('../notifications/notifications.service')
+          await createNotification(
+            providerId,
+            'certification_activated',
+            'Certified Badge Activated!',
+            'Your 25 XAF payment was successful! Your profile now displays the official Certified badge.',
+            { action: 'view_profile' }
+          )
+        }
+      } else {
+        const tx = await campayService.getTransactionStatus(p.certification_campay_ref)
+        const isSuccess = tx && (
+          String(tx.status).toUpperCase() === 'SUCCESSFUL' ||
+          String(tx.status).toUpperCase() === 'COMPLETE' ||
+          String(tx.status).toUpperCase() === 'PAID'
+        )
+        if (isSuccess) {
+          await pool.query(
+            `UPDATE providers SET certification_paid = true, is_certified = true, updated_at = now() WHERE id = $1`,
+            [providerId]
+          )
+          p.certification_paid = true
+          p.is_certified = true
+          const { createNotification } = require('../notifications/notifications.service')
+          await createNotification(
+            providerId,
+            'certification_activated',
+            'Certified Badge Activated!',
+            'Your 25 XAF payment was successful! Your profile now displays the official Certified badge.',
+            { action: 'view_profile' }
+          )
+        }
+      }
+    } catch (e) {
+      // ignore check error
+    }
+  }
+
+  return {
+    certificationStatus:      p.certification_status || 'none',
+    isCertified:              Boolean(p.is_certified),
+    certificationPaid:        Boolean(p.certification_paid),
+    certificationCampayRef:   p.certification_campay_ref,
+    certificationTitle:       p.certification_title,
+    certificationInstitution: p.certification_institution,
+    certificationDocumentUrl: p.certification_document_url,
+    certificationDocumentName:p.certification_document_name,
+    certificationNotes:       p.certification_notes,
+    certificationAppliedAt:   p.certification_applied_at,
+    phone:                    p.phone,
+  }
+}
+
+async function payCertification(providerId, phone = null) {
+  const { rows } = await pool.query(
+    `SELECT u.id, u.first_name, u.last_name, u.email, u.phone,
+            p.certification_status, p.certification_paid, p.is_certified
+     FROM users u
+     JOIN providers p ON p.id = u.id
+     WHERE u.id = $1`,
+    [providerId]
+  )
+
+  if (rows.length === 0) {
+    const err = new Error('Provider not found.')
+    err.status = 404
+    throw err
+  }
+
+  const provider = rows[0]
+  if (provider.certification_status !== 'approved') {
+    const err = new Error('Certification must be approved by admin before paying the badge activation fee.')
+    err.status = 400
+    throw err
+  }
+
+  if (provider.certification_paid && provider.is_certified) {
+    return { message: 'Your Certified badge is already active.', isCertified: true, certificationPaid: true }
+  }
+
+  const targetPhone = phone || provider.phone
+  if (!targetPhone) {
+    const err = new Error('A valid phone number is required to collect payment.')
+    err.status = 400
+    throw err
+  }
+
+  const campayResult = await campayService.collectPayment({
+    amount: 25,
+    currency: 'XAF',
+    phone: targetPhone,
+    from: targetPhone,
+    description: `Carely Certified Badge activation for ${provider.first_name} ${provider.last_name}`,
+    externalReference: `cert_${providerId}_${Date.now()}`,
+  })
+
+  if (campayResult?.reference) {
+    await pool.query(
+      `UPDATE providers
+       SET certification_campay_ref = $1, updated_at = now()
+       WHERE id = $2`,
+      [campayResult.reference, providerId]
+    )
+  }
+
+  return {
+    message: 'Certification badge payment initiated. Please check your phone for the 25 XAF prompt.',
+    reference: campayResult?.reference,
+    operator: campayResult?.operator,
+    ussdCode: campayResult?.ussdCode || campayResult?.ussd_code,
+  }
+}
+
 async function listUsers() {
   const { rows } = await pool.query(`
     SELECT
@@ -681,6 +1136,12 @@ async function updateUser2FA(userId, enabled) {
 module.exports = {
   listApplications,
   listPendingProviders,
+  listCertificationApplications,
+  approveCertification,
+  rejectCertification,
+  requestProviderCertification,
+  getProviderCertificationStatus,
+  payCertification,
   listUsers,
   approveProvider,
   rejectProvider,
