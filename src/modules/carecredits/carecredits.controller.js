@@ -1,6 +1,7 @@
 const svc = require('./carecredits.service')
 const campayService = require('../payments/campay.service')
 const pool = require('../../config/db')
+const { sendReferralInviteEmail } = require('../mail/mail.service')
 
 async function getMyWallet(req, res, next) {
   try {
@@ -143,4 +144,79 @@ async function withdrawCredits(req, res, next) {
   } catch (err) { next(err) }
 }
 
-module.exports = { getMyWallet, validatePromo, purchaseCredits, verifyPurchase, withdrawCredits }
+async function sendInvites(req, res, next) {
+  try {
+    const { emails } = req.body
+    if (!emails) {
+      return res.status(400).json({ error: 'Please provide one or more email addresses.' })
+    }
+
+    // Support either an array of strings or comma/semicolon-separated string
+    let emailList = []
+    if (Array.isArray(emails)) {
+      emailList = emails
+    } else if (typeof emails === 'string') {
+      emailList = emails.split(/[,;\n\s]+/).filter(Boolean)
+    }
+
+    // Normalize and validate email addresses
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+    const validEmails = Array.from(
+      new Set(
+        emailList
+          .map(e => String(e).trim().toLowerCase())
+          .filter(e => emailRegex.test(e))
+      )
+    )
+
+    if (validEmails.length === 0) {
+      return res.status(400).json({ error: 'No valid email addresses found. Please check and try again.' })
+    }
+
+    // Fetch sender user information for the greeting
+    let referrerName = req.user.firstName || 'A friend'
+    try {
+      const userRes = await pool.query('SELECT first_name, last_name FROM users WHERE id = $1', [req.user.id])
+      if (userRes.rows.length > 0) {
+        const u = userRes.rows[0]
+        referrerName = [u.first_name, u.last_name].filter(Boolean).join(' ') || referrerName
+      }
+    } catch (dbErr) {
+      console.warn('Could not query user name for referral invite:', dbErr.message)
+    }
+
+    // Get sender's unique referral code
+    const referralCodeObj = await svc.getOrCreateReferralCode(req.user.id)
+    const referralCode = referralCodeObj.code
+
+    // Determine target login URL
+    const origin = req.headers.origin || (process.env.NODE_ENV === 'production' ? 'https://carely-frontend-ytei.vercel.app' : 'http://localhost:5173')
+    const loginUrl = `${origin}/login?ref=${encodeURIComponent(referralCode)}`
+
+    // Send emails
+    const sendResults = await Promise.allSettled(
+      validEmails.map(to =>
+        sendReferralInviteEmail({
+          to,
+          referrerName,
+          referralCode,
+          loginUrl,
+        })
+      )
+    )
+
+    const successful = sendResults.filter(r => r.status === 'fulfilled' && r.value?.sent).length
+
+    res.json({
+      success: true,
+      sentCount: successful,
+      totalCount: validEmails.length,
+      message: `Successfully sent ${successful} invitation${successful === 1 ? '' : 's'}.`,
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+module.exports = { getMyWallet, validatePromo, purchaseCredits, verifyPurchase, withdrawCredits, sendInvites }
+

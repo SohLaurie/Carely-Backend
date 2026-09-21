@@ -1,4 +1,4 @@
-﻿const { Router } = require('express')
+const { Router } = require('express')
 const auth = require('../../middleware/auth')
 const ctrl = require('./carecredits.controller')
 
@@ -19,4 +19,8 @@ router.get('/purchase/verify/:ref', auth, ctrl.verifyPurchase)
 // POST /api/carecredits/withdraw  — withdraw CC to mobile money
 router.post('/withdraw', auth, ctrl.withdrawCredits)
 
+// POST /api/carecredits/send-invites  — send referral invitation emails to friends
+router.post('/send-invites', auth, ctrl.sendInvites)
+
 module.exports = router
+
