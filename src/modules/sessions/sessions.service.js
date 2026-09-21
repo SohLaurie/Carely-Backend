@@ -168,6 +168,7 @@ async function getSessionsByBooking(bookingId, requesterId) {
        scheduled_date, scheduled_start_time, scheduled_end_time,
        session_amount, status,
        otp_verified_at, completion_marked_at, confirmation_deadline,
+       interrupted_at, interruption_reason, partial_amount,
        dispute_reason, disputed_at,
        -- Only expose the OTP code when booking is paid (confirmed)
        CASE WHEN $2 = 'paid' THEN otp_code ELSE NULL END AS otp_code,
@@ -532,23 +533,197 @@ async function skipSession(sessionId, bookerId) {
   return { message: 'Session skipped. A prorated credit will be applied.' }
 }
 
+// ── Helper: time diff in hours ─────────────────────────────────────────────────
+function timeDiffHours(startTime, endTime) {
+  // startTime / endTime are 'HH:MM:SS' strings from PostgreSQL TIME columns
+  const [sh, sm] = String(startTime).split(':').map(Number)
+  const [eh, em] = String(endTime).split(':').map(Number)
+  return Math.max(1, ((eh * 60 + em) - (sh * 60 + sm)) / 60)
+}
+
+// ── Report Unable to Complete (Provider flags emergency mid-session) ───────────
+async function reportUnableToComplete(sessionId, providerId, reason) {
+  const { rows } = await pool.query(
+    `SELECT s.*, b.provider_id, b.booker_id
+     FROM sessions s
+     JOIN bookings b ON b.id = s.booking_id
+     WHERE s.id = $1`,
+    [sessionId]
+  )
+  if (rows.length === 0) {
+    const err = new Error('Session not found.')
+    err.status = 404
+    throw err
+  }
+  const session = rows[0]
+
+  if (session.provider_id !== providerId) {
+    const err = new Error('Only the assigned provider can report an interruption.')
+    err.status = 403
+    throw err
+  }
+  if (session.status !== 'ARRIVED') {
+    const err = new Error(
+      `Session must be in ARRIVED state to report an interruption. Current status: ${session.status}`
+    )
+    err.status = 400
+    throw err
+  }
+
+  // Calculate hours worked (minimum 1 hour, rounded down)
+  const msWorked = Date.now() - new Date(session.otp_verified_at).getTime()
+  const hoursWorked = Math.max(1, Math.floor(msWorked / 3600000))
+
+  // Calculate partial amount: hours worked × rate per hour
+  const scheduledHours = timeDiffHours(session.scheduled_start_time, session.scheduled_end_time)
+  const ratePerHour = Math.round(session.session_amount / scheduledHours)
+  const partialAmount = Math.min(hoursWorked * ratePerHour, session.session_amount)
+
+  // Confirmation deadline: 24h from now
+  const deadline = new Date(Date.now() + 24 * 60 * 60 * 1000)
+
+  const dbClient = await pool.connect()
+  try {
+    await dbClient.query('BEGIN')
+
+    await dbClient.query(
+      `UPDATE sessions
+       SET status = 'INTERRUPTED',
+           interrupted_at = now(),
+           interruption_reason = $2,
+           partial_amount = $3,
+           confirmation_deadline = $4,
+           updated_at = now()
+       WHERE id = $1`,
+      [sessionId, reason || null, partialAmount, deadline.toISOString()]
+    )
+
+    await syncBookingStatus(dbClient, session.booking_id)
+    await dbClient.query('COMMIT')
+  } catch (err) {
+    await dbClient.query('ROLLBACK')
+    throw err
+  } finally {
+    dbClient.release()
+  }
+
+  // Notify household immediately
+  await createNotification(
+    session.booker_id,
+    'session_interrupted',
+    'Provider reported an emergency',
+    `Your provider had to leave early after ${hoursWorked} hour(s). ` +
+      `They are owed ${partialAmount.toLocaleString()} XAF for time worked. ` +
+      `You have 24 hours to confirm the partial payment or it will be processed automatically.`,
+    { sessionId, bookingId: session.booking_id, partialAmount, hoursWorked }
+  )
+
+  return {
+    message: 'Emergency reported. The household has been notified.',
+    hoursWorked,
+    partialAmount,
+    confirmationDeadline: deadline,
+  }
+}
+
+// ── Confirm Partial Payment (Household confirms after provider interruption) ───
+async function confirmPartialPayment(sessionId, bookerId) {
+  const { rows } = await pool.query(
+    `SELECT s.*, b.booker_id, b.provider_id
+     FROM sessions s
+     JOIN bookings b ON b.id = s.booking_id
+     WHERE s.id = $1`,
+    [sessionId]
+  )
+  if (rows.length === 0) {
+    const err = new Error('Session not found.')
+    err.status = 404
+    throw err
+  }
+  const session = rows[0]
+
+  if (session.booker_id !== bookerId) {
+    const err = new Error('Only the household who made the booking can confirm partial payment.')
+    err.status = 403
+    throw err
+  }
+  if (session.status !== 'INTERRUPTED') {
+    const err = new Error(
+      `Partial payment confirmation is only available for INTERRUPTED sessions. Current status: ${session.status}`
+    )
+    err.status = 400
+    throw err
+  }
+  if (new Date(session.confirmation_deadline) < new Date()) {
+    const err = new Error('The 24-hour confirmation window has passed. Payment was auto-processed.')
+    err.status = 400
+    throw err
+  }
+
+  const dbClient = await pool.connect()
+  try {
+    await dbClient.query('BEGIN')
+
+    await dbClient.query(
+      `UPDATE sessions
+       SET status = 'COMPLETED',
+           completion_marked_at = now(),
+           updated_at = now()
+       WHERE id = $1`,
+      [sessionId]
+    )
+
+    await syncBookingStatus(dbClient, session.booking_id)
+    await dbClient.query('COMMIT')
+  } catch (err) {
+    await dbClient.query('ROLLBACK')
+    throw err
+  } finally {
+    dbClient.release()
+  }
+
+  // Trigger partial payout (non-blocking)
+  try {
+    const { releasePartialEscrow } = require('../payments/payments.service')
+    await releasePartialEscrow(session.booking_id, session.partial_amount)
+  } catch (payErr) {
+    console.error('[PartialPay] releasePartialEscrow error:', payErr.message)
+  }
+
+  // Notify provider
+  await createNotification(
+    session.provider_id,
+    'partial_payment_confirmed',
+    'Partial payment confirmed',
+    `The household confirmed your partial payment. ${(session.partial_amount || 0).toLocaleString()} XAF will be disbursed to you.`,
+    { sessionId, bookingId: session.booking_id }
+  )
+
+  return {
+    message: 'Partial payment confirmed. Escrow will be partially released.',
+    partialAmount: session.partial_amount,
+  }
+}
+
 // ── Auto-Release Expired Sessions ─────────────────────────────────────────────
 /**
  * Called by a cron job (or manually via admin endpoint).
- * Finds sessions past their confirmation_deadline that still have
- * a verified OTP and auto-completes them, releasing escrow.
- * Also marks sessions that were never arrived as MISSED.
+ *
+ * Handles 3 cases per spec:
+ * 1. ARRIVED + past deadline + neither party acted → MISSED (full refund to household — no proof of completion)
+ * 2. INTERRUPTED + past deadline → auto partial payout (fires releasePartialEscrow)
+ * 3. SCHEDULED + past end time + no OTP → MISSED (full refund to household)
  */
 async function autoReleaseExpired() {
   const dbClient = await pool.connect()
   try {
     await dbClient.query('BEGIN')
 
-    // 1. Auto-complete sessions where OTP was verified but client didn't confirm in time
-    const { rows: toComplete } = await dbClient.query(
+    // Case 1: ARRIVED + past deadline + no confirmation from either party → full refund to household
+    // Spec: "Normal, neither party acts within 24h → full refund to household"
+    const { rows: toRefund } = await dbClient.query(
       `UPDATE sessions
-       SET status = 'COMPLETED',
-           completion_marked_at = now(),
+       SET status = 'MISSED',
            updated_at = now()
        WHERE status = 'ARRIVED'
          AND otp_verified_at IS NOT NULL
@@ -556,7 +731,26 @@ async function autoReleaseExpired() {
        RETURNING id, booking_id, session_amount`
     )
 
-    // 2. Mark sessions as MISSED if scheduled date passed with no OTP verification
+    // Case 2: INTERRUPTED + past deadline → auto partial payout
+    const { rows: toPartialPay } = await dbClient.query(
+      `SELECT id, booking_id, partial_amount
+       FROM sessions
+       WHERE status = 'INTERRUPTED'
+         AND confirmation_deadline < now()`
+    )
+
+    // Mark INTERRUPTED sessions as COMPLETED (partial pay fires after commit)
+    if (toPartialPay.length > 0) {
+      const ids = toPartialPay.map(r => r.id)
+      await dbClient.query(
+        `UPDATE sessions
+         SET status = 'COMPLETED', completion_marked_at = now(), updated_at = now()
+         WHERE id = ANY($1::uuid[])`,
+        [ids]
+      )
+    }
+
+    // Case 3: SCHEDULED + past end time + no OTP → MISSED
     const { rows: toMiss } = await dbClient.query(
       `UPDATE sessions
        SET status = 'MISSED', updated_at = now()
@@ -568,7 +762,8 @@ async function autoReleaseExpired() {
 
     // Sync booking statuses for all affected bookings
     const affectedBookingIds = [
-      ...toComplete.map(r => r.booking_id),
+      ...toRefund.map(r => r.booking_id),
+      ...toPartialPay.map(r => r.booking_id),
       ...toMiss.map(r => r.booking_id),
     ]
     const uniqueIds = [...new Set(affectedBookingIds)]
@@ -578,8 +773,22 @@ async function autoReleaseExpired() {
 
     await dbClient.query('COMMIT')
 
+    // After commit: fire partial payouts for auto-resolved INTERRUPTED sessions
+    if (toPartialPay.length > 0) {
+      const { releasePartialEscrow } = require('../payments/payments.service')
+      for (const s of toPartialPay) {
+        try {
+          await releasePartialEscrow(s.booking_id, s.partial_amount)
+          console.log(`[AutoRelease] Partial escrow released for session ${s.id}: ${s.partial_amount} XAF`)
+        } catch (payErr) {
+          console.error(`[AutoRelease] Partial payout failed for session ${s.id}:`, payErr.message)
+        }
+      }
+    }
+
     return {
-      autoCompleted: toComplete.length,
+      autoRefunded: toRefund.length,
+      autoPartialPaid: toPartialPay.length,
       markedMissed: toMiss.length,
       affectedBookings: uniqueIds.length,
     }
@@ -609,7 +818,7 @@ async function syncBookingStatus(dbClient, bookingId) {
     newBookingStatus = 'completed'
   } else if (statuses.some(s => s === 'DISPUTED')) {
     newBookingStatus = 'disputed'
-  } else if (statuses.some(s => ['ARRIVED', 'AWAITING_CONFIRMATION'].includes(s))) {
+  } else if (statuses.some(s => ['ARRIVED', 'AWAITING_CONFIRMATION', 'INTERRUPTED'].includes(s))) {
     newBookingStatus = 'in_progress'
   }
   // Otherwise leave booking status as-is (accepted/confirmed)
@@ -632,4 +841,6 @@ module.exports = {
   disputeSession,
   skipSession,
   autoReleaseExpired,
+  reportUnableToComplete,
+  confirmPartialPayment,
 }

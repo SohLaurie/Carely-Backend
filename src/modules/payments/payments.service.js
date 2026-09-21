@@ -332,6 +332,85 @@ async function refundPayment(bookingId) {
   }
 }
 
+// ── Release Partial Escrow (Partial payout after INTERRUPTED session) ──────────
+async function releasePartialEscrow(bookingId, partialAmount) {
+  if (!partialAmount || partialAmount <= 0) {
+    console.warn(`[PartialEscrow] Invalid partialAmount (${partialAmount}) for booking ${bookingId} — skipping payout`)
+    return { skipped: true }
+  }
+
+  const { rows } = await pool.query(
+    `SELECT p.*, b.provider_id, b.booker_id,
+            u.phone AS provider_phone,
+            u.first_name AS provider_first_name,
+            u.last_name AS provider_last_name
+     FROM payments p
+     JOIN bookings b ON b.id = p.booking_id
+     JOIN users u ON u.id = b.provider_id
+     WHERE p.booking_id = $1 AND p.status = 'held_in_escrow'`,
+    [bookingId]
+  )
+  if (rows.length === 0) {
+    throw Object.assign(new Error('No escrowed payment found for partial payout.'), { status: 404 })
+  }
+
+  const payment = rows[0]
+  const safePartial = Math.min(partialAmount, payment.amount) // never pay more than escrowed
+  const refundAmount = payment.amount - safePartial
+
+  const targetPhone = payment.provider_phone
+  if (!targetPhone) {
+    throw Object.assign(new Error('Provider phone number not found for partial payout.'), { status: 400 })
+  }
+
+  // Disburse partial amount to provider via CamPay
+  const ref = `PARTIAL-${bookingId.slice(0, 8)}-${Date.now()}`
+  let payoutResult
+  try {
+    payoutResult = await campayService.disburseFunds({
+      amount: safePartial,
+      currency: 'XAF',
+      phone: targetPhone,
+      description: `Carely partial payout for booking #${bookingId.slice(0, 8)} to ${payment.provider_first_name || ''} ${payment.provider_last_name || ''}`.trim(),
+      externalReference: ref,
+    })
+  } catch (payoutErr) {
+    console.error(`❌ [Partial Escrow] Payout failed:`, payoutErr.message)
+    throw Object.assign(
+      new Error(`Partial escrow payout failed: ${payoutErr.message}. Funds remain in escrow.`),
+      { status: 502 }
+    )
+  }
+
+  // Update payment record with partial payout audit info
+  const { rows: [updated] } = await pool.query(
+    `UPDATE payments
+     SET status = 'released',
+         escrow_released = true,
+         released_at = now(),
+         partial_provider_amount = $2,
+         partial_refund_amount = $3,
+         updated_at = now()
+     WHERE booking_id = $1 AND status = 'held_in_escrow'
+     RETURNING *`,
+    [bookingId, safePartial, refundAmount]
+  )
+
+  // Update booking payment status
+  await pool.query(
+    `UPDATE bookings SET payment_status = 'partially_released', updated_at = now() WHERE id = $1`,
+    [bookingId]
+  )
+
+  return {
+    message: `Partial escrow released. ${safePartial} XAF transferred to provider. ${refundAmount} XAF to be refunded to household.`,
+    payment: updated,
+    partialProviderAmount: safePartial,
+    partialRefundAmount: refundAmount,
+    payoutRef: payoutResult?.reference || ref,
+  }
+}
+
 // ── Get Payment for Booking ────────────────────────────────────────────────────
 async function getPaymentByBooking(bookingId, userId, role) {
   const { rows: bookingRows } = await pool.query(
@@ -368,5 +447,6 @@ module.exports = {
   handleWebhook,
   releaseEscrow,
   refundPayment,
+  releasePartialEscrow,
   getPaymentByBooking,
 }

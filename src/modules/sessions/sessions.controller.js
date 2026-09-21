@@ -78,13 +78,36 @@ async function providerCompleteSession(req, res, next) {
   } catch (err) { next(err) }
 }
 
+// POST /api/sessions/:id/report-unable (provider reports emergency mid-session)
+async function reportUnableToComplete(req, res, next) {
+  try {
+    const result = await sessionsService.reportUnableToComplete(
+      req.params.id,
+      req.user.id,
+      req.body.reason
+    )
+    res.json(result)
+  } catch (err) { next(err) }
+}
+
+// POST /api/sessions/:id/confirm-partial (household confirms partial payment)
+async function confirmPartialPayment(req, res, next) {
+  try {
+    const result = await sessionsService.confirmPartialPayment(req.params.id, req.user.id)
+    res.json(result)
+  } catch (err) { next(err) }
+}
+
 module.exports = {
   getSessionsByBooking,
   getSession,
   verifyOtp,
   confirmSession,
   providerCompleteSession,
+  reportUnableToComplete,
+  confirmPartialPayment,
   disputeSession,
   skipSession,
   autoRelease,
 }
+

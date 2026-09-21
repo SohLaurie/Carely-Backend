@@ -40,6 +40,23 @@ router.post(
 )
 
 /**
+ * POST /api/sessions/:id/report-unable
+ * Provider reports emergency/interruption mid-session (must be ARRIVED).
+ */
+router.post(
+  '/:id/report-unable',
+  requireRole('provider'),
+  validate(z.object({ reason: z.string().min(3).optional() }).partial()),
+  ctrl.reportUnableToComplete
+)
+
+/**
+ * POST /api/sessions/:id/confirm-partial
+ * Household confirms partial payment for an INTERRUPTED session.
+ */
+router.post('/:id/confirm-partial', ctrl.confirmPartialPayment)
+
+/**
  * POST /api/sessions/:id/confirm
  * Client explicitly confirms a session was completed.
  * Triggers escrow release for this session's amount.

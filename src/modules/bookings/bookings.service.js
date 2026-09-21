@@ -281,6 +281,14 @@ async function acceptBooking(bookingId, providerId) {
 
     await dbClient.query('COMMIT')
 
+    // Hold 5 CC for this booking (non-blocking — do not fail accept on CC error)
+    try {
+      const { holdCreditsForBooking } = require('../carecredits/carecredits.service')
+      await holdCreditsForBooking(providerId, bookingId)
+    } catch (ccErr) {
+      console.warn('[CareCred] holdCreditsForBooking non-fatal error:', ccErr.message)
+    }
+
     // Notify the household that their booking was accepted
     const providerRow = await pool.query(
       `SELECT u.first_name, u.last_name FROM users u WHERE u.id = $1`,
@@ -307,14 +315,6 @@ async function acceptBooking(bookingId, providerId) {
     throw err
   } finally {
     dbClient.release()
-  }
-
-  // Hold 5 CC for this booking (non-blocking — do not fail accept on CC error)
-  try {
-    const { holdCreditsForBooking } = require('../carecredits/carecredits.service')
-    await holdCreditsForBooking(providerId, bookingId)
-  } catch (ccErr) {
-    console.warn('[CareCred] holdCreditsForBooking non-fatal error:', ccErr.message)
   }
 }
 
