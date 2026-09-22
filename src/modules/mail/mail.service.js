@@ -1,4 +1,5 @@
 const fs = require('fs');
+const https = require('https');
 const nodemailer = require('nodemailer');
 const path = require('path');
 const pool = require('../../config/db');
@@ -33,6 +34,8 @@ async function getSmtpConfig() {
 
 /**
  * Create a nodemailer transporter.
+ * Configured with IPv4 enforcement and connection timeouts so it never hangs
+ * indefinitely on cloud hosts (like Render) that drop outbound SMTP packets.
  */
 async function createTransporter() {
   const config = await getSmtpConfig();
@@ -40,20 +43,127 @@ async function createTransporter() {
     return { transporter: null, config, hasCredentials: false };
   }
 
-  const transporter = nodemailer.createTransport({
-    host: config.host,
-    port: config.port,
-    secure: config.secure,
-    auth: {
-      user: config.user,
-      pass: config.pass,
-    },
-    tls: {
-      rejectUnauthorized: false,
-    },
-  });
+  const isGmail = config.host?.includes('gmail') || config.user?.includes('@gmail.com');
+
+  const transportOptions = isGmail
+    ? {
+        service: 'gmail',
+        auth: {
+          user: config.user,
+          pass: config.pass,
+        },
+        family: 4, // Force IPv4 to prevent IPv6 routing blackholes on Render/cloud
+        connectionTimeout: 8000,
+        greetingTimeout: 8000,
+        socketTimeout: 10000,
+      }
+    : {
+        host: config.host,
+        port: config.port,
+        secure: config.secure,
+        auth: {
+          user: config.user,
+          pass: config.pass,
+        },
+        family: 4,
+        connectionTimeout: 8000,
+        greetingTimeout: 8000,
+        socketTimeout: 10000,
+        tls: {
+          rejectUnauthorized: false,
+        },
+      };
+
+  const transporter = nodemailer.createTransport(transportOptions);
 
   return { transporter, config, hasCredentials: true };
+}
+
+/**
+ * Dispatch email via HTTP API (Resend or Brevo) if configured.
+ * Cloud hosts like Render Free Tier block outbound SMTP ports (25, 465, 587),
+ * but HTTP APIs on port 443 are never blocked.
+ */
+async function sendViaHttpProvider({ to, subject, html, text }) {
+  const resendApiKey = process.env.RESEND_API_KEY;
+  const brevoApiKey = process.env.BREVO_API_KEY;
+
+  if (resendApiKey) {
+    return new Promise((resolve, reject) => {
+      const payload = JSON.stringify({
+        from: process.env.RESEND_FROM || 'Carely Support <onboarding@resend.dev>',
+        to: [to],
+        subject,
+        html,
+        text,
+      });
+      const req = https.request('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${resendApiKey}`,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+        timeout: 10000,
+      }, res => {
+        let body = '';
+        res.on('data', chunk => { body += chunk; });
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            try {
+              const data = JSON.parse(body);
+              resolve({ sent: true, mode: 'resend', messageId: data.id });
+            } catch {
+              resolve({ sent: true, mode: 'resend' });
+            }
+          } else {
+            reject(new Error(`Resend HTTP ${res.statusCode}: ${body}`));
+          }
+        });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => req.destroy(new Error('Resend timeout')));
+      req.write(payload);
+      req.end();
+    });
+  }
+
+  if (brevoApiKey) {
+    return new Promise((resolve, reject) => {
+      const payload = JSON.stringify({
+        sender: { email: 'carelycorp237@gmail.com', name: 'Carely Support' },
+        to: [{ email: to }],
+        subject,
+        htmlContent: html,
+        textContent: text,
+      });
+      const req = https.request('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          'api-key': brevoApiKey,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+        timeout: 10000,
+      }, res => {
+        let body = '';
+        res.on('data', chunk => { body += chunk; });
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve({ sent: true, mode: 'brevo' });
+          } else {
+            reject(new Error(`Brevo HTTP ${res.statusCode}: ${body}`));
+          }
+        });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => req.destroy(new Error('Brevo timeout')));
+      req.write(payload);
+      req.end();
+    });
+  }
+
+  return null;
 }
 
 /**
@@ -251,7 +361,23 @@ Carely Support Team (carelycorp237@gmail.com)`,
     // ZERO attachments — logo is rendered via public CDN URL
   };
 
-  // If live SMTP credentials are configured, send real email via Gmail
+  // 1. If an HTTP provider is configured (e.g. Resend, Brevo), send via port 443 (never blocked by Render)
+  try {
+    const httpResult = await sendViaHttpProvider({
+      to,
+      subject: mailOptions.subject,
+      html,
+      text: mailOptions.text,
+    });
+    if (httpResult && httpResult.sent) {
+      console.log(`📧 [Carely Support] Real email sent via ${httpResult.mode} to ${to}: ${httpResult.messageId || ''}`);
+      return { sent: true, mode: httpResult.mode, messageId: httpResult.messageId, resetCode, resetLink };
+    }
+  } catch (httpErr) {
+    console.warn(`⚠️ [Carely Support] HTTP email error: ${httpErr.message}. Trying SMTP...`);
+  }
+
+  // 2. If live SMTP credentials are configured, send real email via Gmail SMTP
   if (hasCredentials && transporter) {
     try {
       const info = await transporter.sendMail(mailOptions);
@@ -450,6 +576,23 @@ Carely Support Team (carelycorp237@gmail.com)`,
     html,
   };
 
+  // 1. Try HTTP provider first if configured
+  try {
+    const httpResult = await sendViaHttpProvider({
+      to,
+      subject: mailOptions.subject,
+      html,
+      text: mailOptions.text,
+    });
+    if (httpResult && httpResult.sent) {
+      console.log(`🔐 [2FA Email] Real 2FA OTP sent via ${httpResult.mode} to ${to}: ${httpResult.messageId || ''}`);
+      return { sent: true, mode: httpResult.mode, messageId: httpResult.messageId, code };
+    }
+  } catch (httpErr) {
+    console.warn(`⚠️ [2FA Email] HTTP email error: ${httpErr.message}. Trying SMTP...`);
+  }
+
+  // 2. Try SMTP via Gmail
   if (hasCredentials && transporter) {
     try {
       const info = await transporter.sendMail(mailOptions);
@@ -619,6 +762,23 @@ Carely Support Team (carelycorp237@gmail.com)`,
     html,
   };
 
+  // 1. Try HTTP provider first if configured
+  try {
+    const httpResult = await sendViaHttpProvider({
+      to,
+      subject: mailOptions.subject,
+      html,
+      text: mailOptions.text,
+    });
+    if (httpResult && httpResult.sent) {
+      console.log(`🎁 [Referral Invite Email] Dispatched via ${httpResult.mode} to ${to}: ${httpResult.messageId || ''}`);
+      return { sent: true, mode: httpResult.mode, messageId: httpResult.messageId };
+    }
+  } catch (httpErr) {
+    console.warn(`⚠️ [Referral Invite Email] HTTP email error: ${httpErr.message}. Trying SMTP...`);
+  }
+
+  // 2. Try SMTP via Gmail
   if (hasCredentials && transporter) {
     try {
       const info = await transporter.sendMail(mailOptions);
