@@ -12,7 +12,8 @@ async function guestMessage(req, res, next) {
     if (!content || !content.trim()) {
       return res.status(400).json({ error: 'Message content is required.' })
     }
-    // Build a minimal guest context
+    // Fetch active providers for real platform recommendations
+    const activeProviders = await svc.fetchActiveProviders()
     const systemPrompt = svc.buildSystemPrompt({
       userId: null,
       role: 'guest',
@@ -20,7 +21,8 @@ async function guestMessage(req, res, next) {
       referralCode: null,
       recentBookings: [],
       providerProfile: null,
-    })
+    }, activeProviders)
+
     // Re-use the internal Gemini call via service
     const reply = await svc.callGeminiPublic(systemPrompt, history, content.trim())
     res.json({ role: 'assistant', content: reply })
