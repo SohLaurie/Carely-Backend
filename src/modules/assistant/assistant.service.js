@@ -11,7 +11,7 @@
 const https = require('https')
 const pool  = require('../../config/db')
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY
+const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || '').trim()
 // Model preference list — tried in order until one succeeds
 const GEMINI_MODELS = [
   'gemini-3.8-flash',      // Latest flash — primary
@@ -67,8 +67,8 @@ CRITICAL SECURITY RULES (follow strictly):
 async function fetchUserContext(userId, role) {
   const context = { userId, role, wallet: null, referralCode: null, recentBookings: [], providerProfile: null }
 
+  // 1. CareCredit wallet
   try {
-    // CareCredit wallet
     const walletRes = await pool.query(
       `SELECT balance, held, GREATEST(0, balance - held) AS available
        FROM carecredit_wallets WHERE user_id = $1`,
@@ -85,23 +85,32 @@ async function fetchUserContext(userId, role) {
     } else {
       context.wallet = { balance: 0, held: 0, available: 0, equivalentFcfa: 0 }
     }
+  } catch (err) {
+    console.warn('[Assistant] wallet lookup error:', err.message)
+    context.wallet = { balance: 0, held: 0, available: 0, equivalentFcfa: 0 }
+  }
 
-    // Referral code
+  // 2. Referral code (uses owner_id in database)
+  try {
     const refRes = await pool.query(
-      `SELECT code FROM referral_codes WHERE user_id = $1 LIMIT 1`,
+      `SELECT code FROM referral_codes WHERE owner_id = $1 AND is_active = true LIMIT 1`,
       [userId]
     )
     if (refRes.rows.length > 0) context.referralCode = refRes.rows[0].code
+  } catch (err) {
+    console.warn('[Assistant] referral code lookup error:', err.message)
+  }
 
-    // Recent bookings (last 8, role-aware)
+  // 3. Recent bookings (last 8, role-aware, schema-safe)
+  try {
     const bookingWhere = role === 'provider'
-      ? `(b.booker_id = $1 OR b.provider_id = (SELECT id FROM providers WHERE id = $1))`
+      ? `(b.booker_id = $1 OR b.provider_id = $1)`
       : `b.booker_id = $1`
 
     const bookingRes = await pool.query(
       `SELECT
-         b.id, b.status, b.service_type, b.total_amount, b.scheduled_date,
-         b.scheduled_time, b.num_sessions, b.created_at,
+         b.id, b.status, b.session_type, b.total_price, b.start_date,
+         b.start_time, b.end_time, b.total_sessions, b.created_at,
          json_build_object(
            'firstName', pu.first_name, 'lastName', pu.last_name, 'profession', p.profession
          ) AS provider
@@ -115,17 +124,23 @@ async function fetchUserContext(userId, role) {
     context.recentBookings = bookingRes.rows.map(b => ({
       id: b.id,
       status: b.status,
-      serviceType: b.service_type,
-      totalAmount: b.total_amount,
-      scheduledDate: b.scheduled_date,
-      scheduledTime: b.scheduled_time,
-      numSessions: b.num_sessions,
-      providerName: `${b.provider.firstName} ${b.provider.lastName}`.trim(),
-      providerProfession: b.provider.profession,
+      sessionType: b.session_type,
+      serviceType: b.provider?.profession || b.session_type,
+      totalAmount: b.total_price,
+      startDate: b.start_date,
+      startTime: b.start_time,
+      endTime: b.end_time,
+      totalSessions: b.total_sessions,
+      providerName: `${b.provider?.firstName || ''} ${b.provider?.lastName || ''}`.trim(),
+      providerProfession: b.provider?.profession || null,
     }))
+  } catch (err) {
+    console.warn('[Assistant] recent bookings lookup error:', err.message)
+  }
 
-    // Provider-specific data
-    if (role === 'provider') {
+  // 4. Provider-specific profile & badges
+  if (role === 'provider') {
+    try {
       const provRes = await pool.query(
         `SELECT
            p.approval_status, p.is_certified, p.subscription_paid,
@@ -158,9 +173,9 @@ async function fetchUserContext(userId, role) {
           },
         }
       }
+    } catch (err) {
+      console.warn('[Assistant] provider profile lookup error:', err.message)
     }
-  } catch (err) {
-    console.warn('[Assistant] fetchUserContext error:', err.message)
   }
 
   return context
