@@ -19,6 +19,7 @@ const uploadRoutes       = require('./modules/upload/upload.routes')
 const discussionsRoutes  = require('./modules/discussions/discussions.routes')
 const notificationsRoutes = require('./modules/notifications/notifications.routes')
 const carecreditsRoutes   = require('./modules/carecredits/carecredits.routes')
+const assistantRoutes     = require('./modules/assistant/assistant.routes')
 
 
 const app = express()
@@ -67,6 +68,7 @@ app.use('/api/upload',       uploadRoutes)
 app.use('/api/discussions',  discussionsRoutes)
 app.use('/api/notifications', notificationsRoutes)
 app.use('/api/carecredits',  carecreditsRoutes)
+app.use('/api/assistant',    assistantRoutes)
 
 
 // ── Auto-Release Cron (every 5 minutes) ────────────────────────────────────────
