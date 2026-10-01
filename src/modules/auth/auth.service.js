@@ -138,42 +138,79 @@ async function registerProvider(data, existingUserId = null) {
         throw err
       }
 
-      // Upgrade role to provider
-      await client.query(
-        "UPDATE users SET role = 'provider', date_of_birth = COALESCE($2, date_of_birth), gender = COALESCE($3, gender), updated_at = now() WHERE id = $1",
-        [existingUserId, dateOfBirth || null, gender || null]
-      )
+      // Upgrade role to provider and update password if provided
+      let updateQuery = "UPDATE users SET role = 'provider', date_of_birth = COALESCE($2, date_of_birth), gender = COALESCE($3, gender), updated_at = now()"
+      const updateParams = [existingUserId, dateOfBirth || null, gender || null]
+      if (password) {
+        const passwordHash = await bcrypt.hash(password, 12)
+        updateQuery += `, password_hash = $4`
+        updateParams.push(passwordHash)
+      }
+      updateQuery += " WHERE id = $1"
+      await client.query(updateQuery, updateParams)
       userRow.role = 'provider'
     } else {
-      // ── Fresh provider registration ──
-      if (!email || !password || !firstName || !lastName || !phone) {
-        const err = new Error('First name, last name, email, phone and password are required for new provider registration.')
-        err.status = 400
-        throw err
-      }
-
+      // ── Check if email belongs to an existing client account upgrading ──
       const existing = await client.query(
-        'SELECT id FROM users WHERE email = $1',
+        'SELECT id, role, first_name, last_name, email, password_hash FROM users WHERE email = $1',
         [email]
       )
+
       if (existing.rows.length > 0) {
-        const err = new Error('An account with this email already exists.')
-        err.status = 409
-        throw err
+        const existingRow = existing.rows[0]
+
+        // If user is a client and upgrading
+        if (existingRow.role === 'client' && (data.isUpgrade || password)) {
+          const providerExists = await client.query(
+            'SELECT id FROM providers WHERE id = $1',
+            [existingRow.id]
+          )
+          if (providerExists.rows.length > 0) {
+            const err = new Error('You already have a provider profile.')
+            err.status = 409
+            throw err
+          }
+
+          // Upgrade role to provider
+          let updateQuery = "UPDATE users SET role = 'provider', date_of_birth = COALESCE($2, date_of_birth), gender = COALESCE($3, gender), updated_at = now()"
+          const updateParams = [existingRow.id, dateOfBirth || null, gender || null]
+          if (password) {
+            const passwordHash = await bcrypt.hash(password, 12)
+            updateQuery += `, password_hash = $4`
+            updateParams.push(passwordHash)
+          }
+          updateQuery += " WHERE id = $1"
+          await client.query(updateQuery, updateParams)
+
+          userRow = existingRow
+          userRow.role = 'provider'
+          userId = existingRow.id
+        } else {
+          const err = new Error('An account with this email already exists.')
+          err.status = 409
+          throw err
+        }
+      } else {
+        // ── Fresh provider registration ──
+        if (!email || !password || !firstName || !lastName || !phone) {
+          const err = new Error('First name, last name, email, phone and password are required for new provider registration.')
+          err.status = 400
+          throw err
+        }
+
+        const passwordHash = await bcrypt.hash(password, 12)
+
+        const { rows } = await client.query(
+          `INSERT INTO users
+             (role, first_name, last_name, email, phone, password_hash, city, date_of_birth, gender)
+           VALUES
+             ('provider', $1, $2, $3, $4, $5, $6, $7, $8)
+           RETURNING id, role, first_name, last_name, email`,
+          [firstName, lastName, email, phone, passwordHash, city || null, dateOfBirth || null, gender || null]
+        )
+        userRow = rows[0]
+        userId = userRow.id
       }
-
-      const passwordHash = await bcrypt.hash(password, 12)
-
-      const { rows } = await client.query(
-        `INSERT INTO users
-           (role, first_name, last_name, email, phone, password_hash, city, date_of_birth, gender)
-         VALUES
-           ('provider', $1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING id, role, first_name, last_name, email`,
-        [firstName, lastName, email, phone, passwordHash, city || null, dateOfBirth || null, gender || null]
-      )
-      userRow = rows[0]
-      userId = userRow.id
     }
 
     const finalPricePerHour = parseInt(hourlyRate || pricePerHour || 500) || 500
@@ -229,7 +266,14 @@ async function registerProvider(data, existingUserId = null) {
         lastName:  userRow.last_name,
         name:      `${userRow.first_name} ${userRow.last_name}`.trim(),
         email:     userRow.email,
+        phone:     userRow.phone,
+        city:      userRow.city,
         photoUrl:  photoUrl || null,
+        profession: profession || null,
+        hourlyRate: finalPricePerHour,
+        pricePerHour: finalPricePerHour,
+        approvalStatus: 'pending',
+        subscriptionPaid: false,
       },
       ...tokens,
     }

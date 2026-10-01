@@ -22,6 +22,7 @@ const registerClientSchema = z.object({
 
 // ── Provider Registration ──────────────────────────────────────────────────────
 const registerProviderSchema = z.object({
+  isUpgrade:      z.boolean().optional(),
   // Account fields
   firstName:      z.string().min(1).optional(),
   lastName:       z.string().min(1).optional(),
